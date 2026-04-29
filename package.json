@@ -1,0 +1,28 @@
+{
+  "name": "terminal-coding-agent",
+  "version": "0.1.0",
+  "description": "A terminal-based AI coding assistant built as a B.Tech CSE capstone project.",
+  "type": "module",
+  "bin": {
+    "terminal-coding-agent": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "cli",
+    "typescript",
+    "coding-assistant",
+    "capstone"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "tsx": "^4.11.0",
+    "typescript": "^5.4.5"
+  }
+}
