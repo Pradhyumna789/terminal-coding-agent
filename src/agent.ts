@@ -3,6 +3,7 @@ import { bashTool } from "./tools/bashTool.js";
 import { readTool } from "./tools/readTool.js";
 import { writeTool } from "./tools/writeTool.js";
 import {
+  logAgentDebug,
   logToolError,
   logToolStart,
   logToolSuccess,
@@ -10,6 +11,10 @@ import {
 } from "./traceLogger.js";
 
 const MAX_AGENT_STEPS = 5;
+
+function getMessageRoleSummary(messages: ChatMessage[]): string {
+  return messages.map((message) => message.role).join(" -> ");
+}
 
 function parseReadToolArguments(rawArguments: string | undefined): string {
   if (!rawArguments) {
@@ -174,10 +179,21 @@ export async function runAgent(prompt: string): Promise<string> {
     messages.push(assistantMessage);
 
     const toolCalls = assistantMessage.tool_calls ?? [];
+    const finalContent = assistantMessage.content?.trim();
 
     if (toolCalls.length === 0) {
-      if (!assistantMessage.content) {
-        throw new Error("Assistant response did not contain final text.");
+      if (!finalContent) {
+        const agentStep = step + 1;
+
+        logAgentDebug("empty assistant response", {
+          step: agentStep,
+          message_count: messages.length,
+          roles: getMessageRoleSummary(messages),
+        });
+
+        throw new Error(
+          `The model returned an empty response at agent step ${agentStep}: no assistant content and no tool calls. Try a different model or a shorter prompt.`,
+        );
       }
 
       return assistantMessage.content;

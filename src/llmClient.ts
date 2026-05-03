@@ -1,5 +1,7 @@
 import { tools } from "./tools/schemas.js";
 
+const LLM_REQUEST_TIMEOUT_MS = 30_000;
+
 export type ToolCall = {
   id?: string;
   type?: "function";
@@ -53,10 +55,6 @@ function parseAssistantMessage(data: LlmResponse): AssistantMessage {
     throw new Error("LLM response did not contain an assistant message.");
   }
 
-  if (!message.content && !message.tool_calls?.length) {
-    throw new Error("LLM response did not contain assistant content or tool calls.");
-  }
-
   return {
     role: "assistant",
     content: message.content ?? null,
@@ -68,24 +66,39 @@ export async function sendMessagesToLlm(messages: ChatMessage[]): Promise<Assist
   const apiUrl = getRequiredEnv("LLM_API_URL");
   const apiKey = getRequiredEnv("LLM_API_KEY");
   const model = getRequiredEnv("LLM_MODEL");
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
 
-  const response = await fetch(apiUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      tools,
-    }),
-  });
+  try {
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        tools,
+      }),
+      signal: controller.signal,
+    });
 
-  if (!response.ok) {
-    throw new Error(`LLM API request failed with status ${response.status}`);
+    if (!response.ok) {
+      throw new Error(`LLM API request failed with status ${response.status}`);
+    }
+
+    const data = (await response.json()) as LlmResponse;
+    return parseAssistantMessage(data);
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(
+        `LLM API request timed out after ${LLM_REQUEST_TIMEOUT_MS / 1000} seconds. Try again, use a shorter prompt, or switch to a faster model.`,
+      );
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  const data = (await response.json()) as LlmResponse;
-  return parseAssistantMessage(data);
 }

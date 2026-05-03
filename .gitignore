@@ -1,5 +1,19 @@
 node_modules/
 dist/
+
 .env
 .env.*
+
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+*.log
+
+# Local files created while testing agent tools
+sample*.txt
+notes.txt
+interactive-notes.txt
+bug-demo.ts
+math-utils.js

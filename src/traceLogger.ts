@@ -25,3 +25,7 @@ export function logToolSuccess(toolName: string, durationMs: number): void {
 export function logToolError(toolName: string, durationMs: number, errorMessage: string): void {
   console.error(`[tool] ${timestamp()} ${toolName} error ${durationMs}ms ${errorMessage}`);
 }
+
+export function logAgentDebug(message: string, details: Record<string, string | number>): void {
+  console.error(`[agent] ${timestamp()} ${message} ${JSON.stringify(details)}`);
+}
