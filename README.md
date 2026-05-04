@@ -14,8 +14,8 @@ The project currently includes:
 - Node.js CLI entry point
 - npm scripts for development and build
 - Basic LLM communication through a REST API
-- Read, Write, and Bash tool schemas advertised to the LLM
-- A simple agent loop that can execute Read, Write, and Bash tool calls
+- Read, Write, Bash, SearchFiles, and TypeCheck tool schemas advertised to the LLM
+- A simple agent loop that can execute Read, Write, Bash, SearchFiles, and TypeCheck tool calls
 - Tool trace logging for capstone-friendly observability
 
 The Bash tool includes a timeout and basic safety checks for obviously dangerous
@@ -30,7 +30,9 @@ terminal-coding-agent/
     tools/
       bashTool.ts
       readTool.ts
+      searchFilesTool.ts
       schemas.ts
+      typeCheckTool.ts
       writeTool.ts
     agent.ts
     index.ts
@@ -113,9 +115,9 @@ Check that the LLM can see the advertised tools:
 npm run dev -- --prompt "What tools are available to you?"
 ```
 
-The program advertises Read, Write, and Bash, executes requested tool calls,
-appends tool results to the conversation, and continues until the model returns a
-final answer.
+The program advertises Read, Write, Bash, SearchFiles, and TypeCheck, executes
+requested tool calls, appends tool results to the conversation, and continues
+until the model returns a final answer.
 
 Create a sample file:
 
@@ -133,6 +135,18 @@ Expected result:
 
 ```text
 The file says: Hello from sample file
+```
+
+Find files when you do not know the exact path:
+
+```powershell
+npm run dev -- --prompt "Use SearchFiles to find traceLogger.ts, then Read the matching file and list its exported functions."
+```
+
+Expected behavior:
+
+```text
+SearchFiles finds src/traceLogger.ts, then Read uses that path.
 ```
 
 Create or overwrite a file with Write:
@@ -169,6 +183,18 @@ Test command failure handling:
 
 ```powershell
 npm run dev -- --prompt "Use Bash to run a command that does not exist."
+```
+
+Run TypeScript typechecking through the agent:
+
+```powershell
+npm run dev -- --prompt "Use TypeCheck to check the project and summarize the result."
+```
+
+TypeCheck runs:
+
+```powershell
+npm run typecheck
 ```
 
 Test safety checks:

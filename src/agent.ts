@@ -1,6 +1,8 @@
 import { type ChatMessage, type ToolCall, sendMessagesToLlm } from "./llmClient.js";
 import { bashTool } from "./tools/bashTool.js";
 import { readTool } from "./tools/readTool.js";
+import { searchFilesTool } from "./tools/searchFilesTool.js";
+import { typeCheckTool } from "./tools/typeCheckTool.js";
 import { writeTool } from "./tools/writeTool.js";
 import {
   logAgentDebug,
@@ -107,6 +109,33 @@ function parseBashToolArguments(rawArguments: string | undefined): string {
   return args.command;
 }
 
+function parseSearchFilesToolArguments(rawArguments: string | undefined): string {
+  if (!rawArguments) {
+    throw new Error("SearchFiles tool call is missing arguments.");
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(rawArguments);
+  } catch {
+    throw new Error("SearchFiles tool arguments must be valid JSON.");
+  }
+
+  const args = parsed as { query?: unknown };
+
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    typeof args.query !== "string" ||
+    args.query.trim() === ""
+  ) {
+    throw new Error("SearchFiles tool requires query as a non-empty string.");
+  }
+
+  return args.query;
+}
+
 async function executeToolCall(toolCall: ToolCall): Promise<string> {
   if (!toolCall.id) {
     throw new Error("Tool call is missing an id.");
@@ -163,6 +192,35 @@ async function executeToolCall(toolCall: ToolCall): Promise<string> {
     }
   }
 
+  if (toolName === "SearchFiles") {
+    const query = parseSearchFilesToolArguments(toolCall.function?.arguments);
+    logToolStart("SearchFiles", { query });
+
+    try {
+      const result = await searchFilesTool(query);
+      logToolSuccess("SearchFiles", Date.now() - startedAt);
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      logToolError("SearchFiles", Date.now() - startedAt, message);
+      throw error;
+    }
+  }
+
+  if (toolName === "TypeCheck") {
+    logToolStart("TypeCheck", { command: "npm run typecheck" });
+
+    try {
+      const result = await typeCheckTool();
+      logToolSuccess("TypeCheck", Date.now() - startedAt);
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      logToolError("TypeCheck", Date.now() - startedAt, message);
+      throw error;
+    }
+  }
+
   throw new Error(`Unsupported tool requested: ${toolName ?? "unknown"}`);
 }
 
@@ -196,7 +254,7 @@ export async function runAgent(prompt: string): Promise<string> {
         );
       }
 
-      return assistantMessage.content;
+      return finalContent;
     }
 
     for (const toolCall of toolCalls) {

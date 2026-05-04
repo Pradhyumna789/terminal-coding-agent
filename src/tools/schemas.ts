@@ -57,4 +57,37 @@ export const tools = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "SearchFiles",
+      description:
+        "searches project file names and returns matching relative paths; use this before Read when the exact file path is unknown",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "File name or partial file path to search for.",
+          },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "TypeCheck",
+      description:
+        "runs the project's TypeScript typecheck command and returns stdout, stderr, and exit code",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+        additionalProperties: false,
+      },
+    },
+  },
 ] as const;

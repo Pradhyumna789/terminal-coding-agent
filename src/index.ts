@@ -37,6 +37,15 @@ function isExitCommand(value: string): boolean {
   return normalized === "exit" || normalized === "quit";
 }
 
+function isClearCommand(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "clear" || normalized === "cls";
+}
+
+function clearTerminal(): void {
+  console.clear();
+}
+
 async function runOneShot(prompt: string): Promise<void> {
   const finalAnswer = await runAgent(prompt);
   console.log(finalAnswer);
@@ -56,6 +65,11 @@ async function runInteractiveMode(): Promise<void> {
 
       if (isExitCommand(prompt)) {
         return;
+      }
+
+      if (isClearCommand(prompt)) {
+        clearTerminal();
+        continue;
       }
 
       try {
