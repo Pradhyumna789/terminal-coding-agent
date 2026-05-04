@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { redactSecretValues } from "./traceLogger.js";
 
-export type AgentRunMode = "normal" | "tdd";
+export type AgentRunMode = "normal" | "tdd" | "docs";
 
 type RecorderArguments = Record<string, string | number>;
 

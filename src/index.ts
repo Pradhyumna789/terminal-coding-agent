@@ -3,9 +3,11 @@
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { runAgent } from "./agent.js";
+import { runDocsMode } from "./docsMode.js";
 import { runSpecFirst } from "./specFirst.js";
 import { runTddMode } from "./tddMode.js";
 
+const DOCS_COMMAND_PREFIX = "/docs";
 const SPEC_COMMAND_PREFIX = "/spec";
 const TDD_COMMAND_PREFIX = "/tdd";
 
@@ -76,6 +78,11 @@ async function runTddOneShot(task: string): Promise<void> {
   console.log(finalAnswer);
 }
 
+async function runDocsOneShot(topic: string): Promise<void> {
+  const finalAnswer = await runDocsMode(topic);
+  console.log(finalAnswer);
+}
+
 function getSlashCommandTask(prompt: string, commandPrefix: string): string | null {
   if (prompt === commandPrefix) {
     return "";
@@ -106,6 +113,24 @@ async function runInteractiveMode(): Promise<void> {
 
       if (isClearCommand(prompt)) {
         clearTerminal();
+        continue;
+      }
+
+      const docsTopic = getSlashCommandTask(prompt, DOCS_COMMAND_PREFIX);
+
+      if (docsTopic !== null) {
+        if (!docsTopic) {
+          console.error("Usage: /docs describe the documentation topic");
+          continue;
+        }
+
+        try {
+          await runDocsOneShot(docsTopic);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          console.error(`Error: ${message}`);
+        }
+
         continue;
       }
 

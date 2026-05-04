@@ -40,6 +40,7 @@ terminal-coding-agent/
     agent.ts
     blackBoxRecorder.ts
     doneCriteria.ts
+    docsMode.ts
     index.ts
     llmClient.ts
     specFirst.ts
@@ -139,6 +140,26 @@ Done criteria: PASSED
 
 If a required check fails, the final answer reports `Done criteria: FAILED` and
 marks the task as not done.
+
+DocuBuddy documentation mode is available in interactive mode:
+
+```text
+agent> /docs architecture of the agent loop and tools
+```
+
+It uses SearchFiles and Read to inspect relevant files, then writes Markdown
+documentation to `docs/generated-architecture.md` by default. It can include
+Mermaid diagrams:
+
+````text
+```mermaid
+flowchart TD
+  CLI["CLI"] --> Agent["Agent loop"]
+```
+````
+
+The terminal output stays short and confirms which files were inspected and
+where the generated documentation was saved.
 
 ## Build And Run
 

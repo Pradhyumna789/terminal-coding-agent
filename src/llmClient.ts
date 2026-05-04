@@ -1,7 +1,5 @@
 import { tools } from "./tools/schemas.js";
 
-const LLM_REQUEST_TIMEOUT_MS = 30_000;
-
 export type ToolCall = {
   id?: string;
   type?: "function";
@@ -74,39 +72,24 @@ export async function sendMessagesToLlm(
   const apiKey = getRequiredEnv("LLM_API_KEY");
   const model = getRequiredEnv("LLM_MODEL");
   const includeTools = options.includeTools ?? true;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
 
-  try {
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        ...(includeTools ? { tools } : {}),
-      }),
-      signal: controller.signal,
-    });
+  const response = await fetch(apiUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      ...(includeTools ? { tools } : {}),
+    }),
+  });
 
-    if (!response.ok) {
-      throw new Error(`LLM API request failed with status ${response.status}`);
-    }
-
-    const data = (await response.json()) as LlmResponse;
-    return parseAssistantMessage(data);
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(
-        `LLM API request timed out after ${LLM_REQUEST_TIMEOUT_MS / 1000} seconds. Try again, use a shorter prompt, or switch to a faster model.`,
-      );
-    }
-
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
+  if (!response.ok) {
+    throw new Error(`LLM API request failed with status ${response.status}`);
   }
+
+  const data = (await response.json()) as LlmResponse;
+  return parseAssistantMessage(data);
 }
