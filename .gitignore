@@ -1,5 +1,6 @@
 node_modules/
 dist/
+runs/
 
 .env
 .env.*
@@ -15,5 +16,8 @@ pnpm-debug.log*
 sample*.txt
 notes.txt
 interactive-notes.txt
+recorder-test.txt
+sandbox-test.txt
+should-not-exist.txt
 bug-demo.ts
 math-utils.js

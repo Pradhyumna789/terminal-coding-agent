@@ -38,6 +38,8 @@ terminal-coding-agent/
     diagnostics/
       typescriptDiagnostics.ts
     agent.ts
+    blackBoxRecorder.ts
+    doneCriteria.ts
     index.ts
     llmClient.ts
     specFirst.ts
@@ -125,6 +127,18 @@ agent> /tdd Add tests for path sandbox behavior
 
 If no test framework exists, the agent should explain that and use TypeCheck as
 a fallback only when it fits the task.
+
+TDD mode also runs a done-criteria harness before reporting completion:
+
+```text
+Done criteria: PASSED
+- TypeCheck: PASSED - npm run typecheck passed.
+- Tests: SKIPPED - No real npm test script found in package.json.
+- Final summary: PASSED - Final summary was generated.
+```
+
+If a required check fails, the final answer reports `Done criteria: FAILED` and
+marks the task as not done.
 
 ## Build And Run
 
@@ -280,4 +294,21 @@ To keep only the final answer in a file:
 
 ```powershell
 npm run dev -- --prompt "Say hello" > answer.txt
+```
+
+## Black Box Recorder
+
+Each agent run writes a structured JSON record into `runs/`. Records include the
+timestamp, mode, sanitized prompt, tool calls, sanitized arguments, short result
+summaries, files read and written, Bash commands, TypeCheck summaries, final
+answer, and errors.
+
+The recorder does not store API keys, hidden model reasoning, full file contents,
+or full Write content. The `runs/` directory is ignored by git.
+
+Example:
+
+```powershell
+npm run dev -- --prompt "Use TypeCheck and summarize diagnostics"
+Get-ChildItem runs
 ```

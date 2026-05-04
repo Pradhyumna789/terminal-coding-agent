@@ -1,4 +1,9 @@
 import { type ChatMessage, type ToolCall, sendMessagesToLlm } from "./llmClient.js";
+import {
+  type AgentRunMode,
+  type BlackBoxRecorder,
+  createBlackBoxRecorder,
+} from "./blackBoxRecorder.js";
 import { bashTool } from "./tools/bashTool.js";
 import { readTool } from "./tools/readTool.js";
 import { searchFilesTool } from "./tools/searchFilesTool.js";
@@ -16,6 +21,7 @@ const MAX_AGENT_STEPS = 50;
 
 type RunAgentOptions = {
   maxSteps?: number | null;
+  mode?: AgentRunMode;
 };
 
 function getMessageRoleSummary(messages: ChatMessage[]): string {
@@ -140,7 +146,37 @@ function parseSearchFilesToolArguments(rawArguments: string | undefined): string
   return args.query;
 }
 
-async function executeToolCall(toolCall: ToolCall): Promise<string> {
+function summarizeToolResult(toolName: string, result: string): string {
+  if (toolName === "Read") {
+    return `Read completed. ${result.length} characters returned.`;
+  }
+
+  if (toolName === "SearchFiles") {
+    if (result.startsWith("No files matched")) {
+      return result;
+    }
+
+    const matchCount = result.split("\n").filter(Boolean).length;
+    return `Found ${matchCount} matching path(s).`;
+  }
+
+  const firstLine = result.split("\n").find((line) => line.trim() !== "");
+  return firstLine ?? `${toolName} completed.`;
+}
+
+async function saveRecorderSafely(recorder: BlackBoxRecorder): Promise<void> {
+  try {
+    await recorder.save();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    console.error(`[recorder] failed to save run: ${message}`);
+  }
+}
+
+async function executeToolCall(
+  toolCall: ToolCall,
+  recorder: BlackBoxRecorder,
+): Promise<string> {
   if (!toolCall.id) {
     throw new Error("Tool call is missing an id.");
   }
@@ -151,10 +187,13 @@ async function executeToolCall(toolCall: ToolCall): Promise<string> {
   if (toolName === "Read") {
     const filePath = parseReadToolArguments(toolCall.function?.arguments);
     logToolStart("Read", { file_path: filePath });
+    recorder.recordToolCall("Read", { file_path: filePath });
+    recorder.recordFileRead(filePath);
 
     try {
       const result = await readTool(filePath);
       logToolSuccess("Read", Date.now() - startedAt);
+      recorder.recordToolResult("Read", summarizeToolResult("Read", result));
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -169,10 +208,16 @@ async function executeToolCall(toolCall: ToolCall): Promise<string> {
       file_path: args.filePath,
       content_length: args.content.length,
     });
+    recorder.recordToolCall("Write", {
+      file_path: args.filePath,
+      content_length: args.content.length,
+    });
+    recorder.recordFileWritten(args.filePath);
 
     try {
       const result = await writeTool(args.filePath, args.content);
       logToolSuccess("Write", Date.now() - startedAt);
+      recorder.recordToolResult("Write", summarizeToolResult("Write", result));
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -184,10 +229,13 @@ async function executeToolCall(toolCall: ToolCall): Promise<string> {
   if (toolName === "Bash") {
     const command = parseBashToolArguments(toolCall.function?.arguments);
     logToolStart("Bash", { command: redactSecretValues(command) });
+    recorder.recordToolCall("Bash", { command: redactSecretValues(command) });
+    recorder.recordBashCommand(command);
 
     try {
       const result = await bashTool(command);
       logToolSuccess("Bash", Date.now() - startedAt);
+      recorder.recordToolResult("Bash", summarizeToolResult("Bash", result));
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -199,10 +247,12 @@ async function executeToolCall(toolCall: ToolCall): Promise<string> {
   if (toolName === "SearchFiles") {
     const query = parseSearchFilesToolArguments(toolCall.function?.arguments);
     logToolStart("SearchFiles", { query });
+    recorder.recordToolCall("SearchFiles", { query });
 
     try {
       const result = await searchFilesTool(query);
       logToolSuccess("SearchFiles", Date.now() - startedAt);
+      recorder.recordToolResult("SearchFiles", summarizeToolResult("SearchFiles", result));
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -213,10 +263,14 @@ async function executeToolCall(toolCall: ToolCall): Promise<string> {
 
   if (toolName === "TypeCheck") {
     logToolStart("TypeCheck", { command: "npm run typecheck" });
+    recorder.recordToolCall("TypeCheck", { command: "npm run typecheck" });
 
     try {
       const result = await typeCheckTool();
       logToolSuccess("TypeCheck", Date.now() - startedAt);
+      const summary = summarizeToolResult("TypeCheck", result);
+      recorder.recordToolResult("TypeCheck", summary);
+      recorder.recordTypeCheckResult(summary);
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
@@ -230,6 +284,10 @@ async function executeToolCall(toolCall: ToolCall): Promise<string> {
 
 export async function runAgent(prompt: string, options: RunAgentOptions = {}): Promise<string> {
   const maxSteps = options.maxSteps ?? MAX_AGENT_STEPS;
+  const recorder = createBlackBoxRecorder({
+    prompt,
+    mode: options.mode,
+  });
   const messages: ChatMessage[] = [
     {
       role: "user",
@@ -237,45 +295,54 @@ export async function runAgent(prompt: string, options: RunAgentOptions = {}): P
     },
   ];
 
-  for (let step = 0; maxSteps === null || step < maxSteps; step += 1) {
-    const assistantMessage = await sendMessagesToLlm(messages);
-    messages.push(assistantMessage);
+  try {
+    for (let step = 0; maxSteps === null || step < maxSteps; step += 1) {
+      const assistantMessage = await sendMessagesToLlm(messages);
+      messages.push(assistantMessage);
 
-    const toolCalls = assistantMessage.tool_calls ?? [];
-    const finalContent = assistantMessage.content?.trim();
+      const toolCalls = assistantMessage.tool_calls ?? [];
+      const finalContent = assistantMessage.content?.trim();
 
-    if (toolCalls.length === 0) {
-      if (!finalContent) {
-        const agentStep = step + 1;
+      if (toolCalls.length === 0) {
+        if (!finalContent) {
+          const agentStep = step + 1;
 
-        logAgentDebug("empty assistant response", {
-          step: agentStep,
-          message_count: messages.length,
-          roles: getMessageRoleSummary(messages),
+          logAgentDebug("empty assistant response", {
+            step: agentStep,
+            message_count: messages.length,
+            roles: getMessageRoleSummary(messages),
+          });
+
+          throw new Error(
+            `The model returned an empty response at agent step ${agentStep}: no assistant content and no tool calls. Try a different model or a shorter prompt.`,
+          );
+        }
+
+        recorder.recordFinalAnswer(finalContent);
+        await saveRecorderSafely(recorder);
+        return finalContent;
+      }
+
+      for (const toolCall of toolCalls) {
+        if (!toolCall.id) {
+          throw new Error("Tool call is missing an id.");
+        }
+
+        const toolResult = await executeToolCall(toolCall, recorder);
+
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: toolResult,
         });
-
-        throw new Error(
-          `The model returned an empty response at agent step ${agentStep}: no assistant content and no tool calls. Try a different model or a shorter prompt.`,
-        );
       }
-
-      return finalContent;
     }
 
-    for (const toolCall of toolCalls) {
-      if (!toolCall.id) {
-        throw new Error("Tool call is missing an id.");
-      }
-
-      const toolResult = await executeToolCall(toolCall);
-
-      messages.push({
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: toolResult,
-      });
-    }
+    throw new Error(`Agent stopped after reaching the maximum of ${maxSteps} steps.`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    recorder.recordError(message);
+    await saveRecorderSafely(recorder);
+    throw error;
   }
-
-  throw new Error(`Agent stopped after reaching the maximum of ${maxSteps} steps.`);
 }

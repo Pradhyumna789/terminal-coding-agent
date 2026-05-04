@@ -1,3 +1,7 @@
+import {
+  formatDoneCriteriaResult,
+  runDoneCriteria,
+} from "./doneCriteria.js";
 import { runAgent } from "./agent.js";
 
 function buildTddPrompt(task: string): string {
@@ -26,5 +30,22 @@ If no test framework exists:
 }
 
 export async function runTddMode(task: string): Promise<string> {
-  return runAgent(buildTddPrompt(task), { maxSteps: null });
+  const agentSummary = await runAgent(buildTddPrompt(task), {
+    maxSteps: null,
+    mode: "tdd",
+  });
+  const doneCriteria = await runDoneCriteria(agentSummary);
+  const doneCriteriaReport = formatDoneCriteriaResult(doneCriteria);
+
+  if (!doneCriteria.passed) {
+    return `${agentSummary}
+
+${doneCriteriaReport}
+
+Status: NOT DONE. One or more required verification checks failed.`;
+  }
+
+  return `${agentSummary}
+
+${doneCriteriaReport}`;
 }
