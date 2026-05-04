@@ -38,6 +38,10 @@ type LlmResponse = {
   }>;
 };
 
+type SendMessagesOptions = {
+  includeTools?: boolean;
+};
+
 function getRequiredEnv(name: string): string {
   const value = process.env[name];
 
@@ -62,10 +66,14 @@ function parseAssistantMessage(data: LlmResponse): AssistantMessage {
   };
 }
 
-export async function sendMessagesToLlm(messages: ChatMessage[]): Promise<AssistantMessage> {
+export async function sendMessagesToLlm(
+  messages: ChatMessage[],
+  options: SendMessagesOptions = {},
+): Promise<AssistantMessage> {
   const apiUrl = getRequiredEnv("LLM_API_URL");
   const apiKey = getRequiredEnv("LLM_API_KEY");
   const model = getRequiredEnv("LLM_MODEL");
+  const includeTools = options.includeTools ?? true;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), LLM_REQUEST_TIMEOUT_MS);
 
@@ -79,7 +87,7 @@ export async function sendMessagesToLlm(messages: ChatMessage[]): Promise<Assist
       body: JSON.stringify({
         model,
         messages,
-        tools,
+        ...(includeTools ? { tools } : {}),
       }),
       signal: controller.signal,
     });

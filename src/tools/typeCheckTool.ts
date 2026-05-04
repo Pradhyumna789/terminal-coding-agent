@@ -1,5 +1,9 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import {
+  formatTypeScriptDiagnostics,
+  parseTypeScriptDiagnostics,
+} from "../diagnostics/typescriptDiagnostics.js";
 
 const execAsync = promisify(exec);
 const TYPECHECK_TIMEOUT_MS = 30_000;
@@ -26,7 +30,13 @@ function toOutputText(value: unknown): string {
 }
 
 function formatTypeCheckResult(exitCode: number | string, stdout = "", stderr = ""): string {
+  const diagnostics = parseTypeScriptDiagnostics(`${stdout}\n${stderr}`);
+
   return `Exit code: ${exitCode}
+Structured diagnostics:
+${formatTypeScriptDiagnostics(diagnostics)}
+
+Raw output:
 STDOUT:
 ${stdout}
 

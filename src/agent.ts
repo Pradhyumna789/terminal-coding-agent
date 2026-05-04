@@ -12,7 +12,11 @@ import {
   redactSecretValues,
 } from "./traceLogger.js";
 
-const MAX_AGENT_STEPS = 5;
+const MAX_AGENT_STEPS = 50;
+
+type RunAgentOptions = {
+  maxSteps?: number | null;
+};
 
 function getMessageRoleSummary(messages: ChatMessage[]): string {
   return messages.map((message) => message.role).join(" -> ");
@@ -224,7 +228,8 @@ async function executeToolCall(toolCall: ToolCall): Promise<string> {
   throw new Error(`Unsupported tool requested: ${toolName ?? "unknown"}`);
 }
 
-export async function runAgent(prompt: string): Promise<string> {
+export async function runAgent(prompt: string, options: RunAgentOptions = {}): Promise<string> {
+  const maxSteps = options.maxSteps ?? MAX_AGENT_STEPS;
   const messages: ChatMessage[] = [
     {
       role: "user",
@@ -232,7 +237,7 @@ export async function runAgent(prompt: string): Promise<string> {
     },
   ];
 
-  for (let step = 0; step < MAX_AGENT_STEPS; step += 1) {
+  for (let step = 0; maxSteps === null || step < maxSteps; step += 1) {
     const assistantMessage = await sendMessagesToLlm(messages);
     messages.push(assistantMessage);
 
@@ -272,5 +277,5 @@ export async function runAgent(prompt: string): Promise<string> {
     }
   }
 
-  throw new Error(`Agent stopped after reaching the maximum of ${MAX_AGENT_STEPS} steps.`);
+  throw new Error(`Agent stopped after reaching the maximum of ${maxSteps} steps.`);
 }

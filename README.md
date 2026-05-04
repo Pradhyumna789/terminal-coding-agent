@@ -29,14 +29,19 @@ terminal-coding-agent/
   src/
     tools/
       bashTool.ts
+      pathSafety.ts
       readTool.ts
       searchFilesTool.ts
       schemas.ts
       typeCheckTool.ts
       writeTool.ts
+    diagnostics/
+      typescriptDiagnostics.ts
     agent.ts
     index.ts
     llmClient.ts
+    specFirst.ts
+    tddMode.ts
     traceLogger.ts
   package.json
   tsconfig.json
@@ -81,6 +86,46 @@ Short flag:
 npm run dev -- -p "Explain TypeScript in one sentence"
 ```
 
+Spec-first mode creates a short implementation spec without advertising tools or
+modifying files:
+
+```powershell
+npm run dev -- --spec-first --prompt "Add a Format tool that runs prettier"
+```
+
+Interactive spec-first command:
+
+```text
+agent> /spec Add a Format tool that runs prettier
+```
+
+Expected sections:
+
+```text
+1. Requirement summary
+2. Assumptions
+3. Edge cases
+4. Files likely affected
+5. Test plan
+6. Confirmation question
+```
+
+TDD mode asks the agent to inspect files, create or update tests first, run
+verification, implement the smallest change, and verify again:
+
+```powershell
+npm run dev -- --tdd --prompt "Add tests for path sandbox behavior"
+```
+
+Interactive TDD command:
+
+```text
+agent> /tdd Add tests for path sandbox behavior
+```
+
+If no test framework exists, the agent should explain that and use TypeCheck as
+a fallback only when it fits the task.
+
 ## Build And Run
 
 Compile TypeScript:
@@ -118,6 +163,13 @@ npm run dev -- --prompt "What tools are available to you?"
 The program advertises Read, Write, Bash, SearchFiles, and TypeCheck, executes
 requested tool calls, appends tool results to the conversation, and continues
 until the model returns a final answer.
+
+## Project Sandbox
+
+Read and Write resolve paths relative to the current project root
+(`process.cwd()`). They allow normal project paths such as `README.md`,
+`package.json`, and `src/index.ts`, but block paths that escape the project root
+with `../` or unsafe absolute paths outside the project.
 
 Create a sample file:
 
@@ -195,6 +247,14 @@ TypeCheck runs:
 
 ```powershell
 npm run typecheck
+```
+
+When TypeScript errors exist, TypeCheck returns both raw compiler output and a
+structured diagnostics section:
+
+```text
+Structured diagnostics:
+- src/agent.ts:42:12 - Type error: Type 'string | null' is not assignable to type 'string'.
 ```
 
 Test safety checks:
