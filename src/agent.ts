@@ -348,6 +348,7 @@ async function executeToolCall(
   if (toolName === "Write") {
     const args = parseWriteToolArguments(toolCall.function?.arguments);
     setToolFilePath(span, args.filePath);
+    span.setAttribute("tool.content_length", args.content.length);
     logToolStart("Write", {
       file_path: args.filePath,
       content_length: args.content.length,
