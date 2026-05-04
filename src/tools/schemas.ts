@@ -90,4 +90,23 @@ export const tools = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "DocumentSymbols",
+      description:
+        "uses the real TypeScript language server to list document symbols in a TypeScript or JavaScript file",
+      parameters: {
+        type: "object",
+        properties: {
+          file_path: {
+            type: "string",
+            description: "Path of the TypeScript or JavaScript file to inspect.",
+          },
+        },
+        required: ["file_path"],
+        additionalProperties: false,
+      },
+    },
+  },
 ] as const;

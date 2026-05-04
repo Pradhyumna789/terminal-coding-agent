@@ -2,10 +2,13 @@
 
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
+import { runAcpMode } from "./acpMode.js";
+import { runAcpRealMode } from "./acpRealMode.js";
 import { runAgent } from "./agent.js";
 import { runDocsMode } from "./docsMode.js";
 import { runSpecFirst } from "./specFirst.js";
 import { runTddMode } from "./tddMode.js";
+import { initTelemetry, shutdownTelemetry } from "./telemetry.js";
 
 const DOCS_COMMAND_PREFIX = "/docs";
 const SPEC_COMMAND_PREFIX = "/spec";
@@ -42,11 +45,21 @@ function hasTddFlag(args: string[]): boolean {
   return args.includes("--tdd");
 }
 
+function hasAcpFlag(args: string[]): boolean {
+  return args.includes("--acp");
+}
+
+function hasAcpRealFlag(args: string[]): boolean {
+  return args.includes("--acp-real");
+}
+
 function printUsage(): void {
   console.error('Usage: npm run dev -- --prompt "your prompt here"');
   console.error('   or: npm run dev -- -p "your prompt here"');
   console.error('   or: npm run dev -- --spec-first --prompt "your task here"');
   console.error('   or: npm run dev -- --tdd --prompt "your task here"');
+  console.error("   or: npm run dev -- --acp");
+  console.error("   or: npm run dev -- --acp-real");
 }
 
 function isExitCommand(value: string): boolean {
@@ -183,10 +196,25 @@ async function runInteractiveMode(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  await initTelemetry();
+
   const args = process.argv.slice(2);
   const prompt = getPromptFromArgs(args);
+  const acp = hasAcpFlag(args);
+  const acpReal = hasAcpRealFlag(args);
+  const stdinIsPiped = input.isTTY !== true;
   const specFirst = hasSpecFirstFlag(args);
   const tdd = hasTddFlag(args);
+
+  if (acpReal) {
+    await runAcpRealMode();
+    return;
+  }
+
+  if (acp || (stdinIsPiped && !prompt)) {
+    await runAcpMode();
+    return;
+  }
 
   if (specFirst && tdd) {
     console.error("Use either --spec-first or --tdd, not both.");
@@ -224,4 +252,6 @@ try {
   const message = error instanceof Error ? error.message : "Unknown error";
   console.error(`Error: ${message}`);
   process.exitCode = 1;
+} finally {
+  await shutdownTelemetry();
 }

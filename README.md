@@ -161,6 +161,167 @@ flowchart TD
 The terminal output stays short and confirms which files were inspected and
 where the generated documentation was saved.
 
+Phase 9 adds a minimal real LSP integration through the `DocumentSymbols` tool.
+It starts `typescript-language-server`, opens the requested file, and asks the
+server for `textDocument/documentSymbol` results.
+
+Example:
+
+```text
+agent> Use DocumentSymbols on src/agent.ts and summarize the main functions.
+```
+
+This is intentionally the first small LSP-backed capability. TypeCheck and the
+existing LSP-lite diagnostics remain unchanged.
+
+ACP-like JSON protocol mode is available with `--acp`. In this mode the app
+reads newline-delimited JSON requests from stdin and writes JSON events to
+stdout. Tool traces and debug logs remain on stderr.
+
+Input:
+
+```json
+{"type":"run","id":"req_1","prompt":"Say hello in one short sentence."}
+```
+
+Output:
+
+```json
+{"type":"started","id":"req_1"}
+{"type":"agent_event","id":"req_1","event":{"type":"agent_started","prompt":"Say hello in one short sentence."}}
+{"type":"agent_event","id":"req_1","event":{"type":"agent_completed","finalAnswer":"Hello!"}}
+{"type":"completed","id":"req_1","finalAnswer":"Hello!"}
+```
+
+PowerShell test:
+
+```powershell
+'{"type":"run","id":"req_1","prompt":"Say hello in one short sentence."}' | npm run --silent dev -- --acp
+```
+
+Use `npm run --silent` for ACP tests so npm does not print its own script
+header into stdout. When stdin is piped and no `--prompt` is provided, the app
+also treats the input as ACP JSON lines.
+
+ACP mode also streams structured agent events while a request is running:
+
+- `agent_started`
+- `tool_started`
+- `tool_completed`
+- `tool_error`
+- `agent_completed`
+- `agent_error`
+
+Tool event arguments are sanitized and do not include full file contents, Write
+contents, API keys, or hidden model reasoning.
+
+ACP mode also supports session commands:
+
+```json
+{"type":"ping","id":"p1"}
+```
+
+returns:
+
+```json
+{"type":"pong","id":"p1"}
+```
+
+```json
+{"type":"capabilities","id":"c1"}
+```
+
+returns:
+
+```json
+{"type":"capabilities_result","id":"c1","capabilities":{"tools":["Read","Write","Bash","SearchFiles","TypeCheck","DocumentSymbols"],"modes":["one-shot","interactive","spec-first","tdd","docs","acp"],"supportsStreamingEvents":true}}
+```
+
+Real ACP compatibility mode is available separately:
+
+```powershell
+npm run --silent dev -- --acp-real
+```
+
+This mode uses JSON-RPC 2.0 messages and keeps the internal `--acp` JSON-lines
+mode unchanged. The first supported real-ACP methods are:
+
+- `initialize`
+- `session/new`
+- `session/prompt`
+- `session/cancel`
+
+The adapter maps agent tool events to `session/update` notifications and returns
+`stopReason: "end_turn"` when the prompt finishes. Unsupported official ACP
+features, such as loading old sessions, real cancellation, image/audio prompt
+blocks, permission requests, and client filesystem/terminal methods, are future
+work.
+
+If stdin is piped and the input message has `jsonrpc: "2.0"`, the app also
+routes it to the real ACP compatibility layer automatically.
+
+## Observability Stack
+
+The Docker Compose observability stack includes:
+
+- OpenTelemetry Collector
+- Jaeger
+- Grafana
+- Grafana Tempo
+
+Start the stack:
+
+```powershell
+docker compose -f observability/docker-compose.yml up -d
+```
+
+Check containers:
+
+```powershell
+docker compose -f observability/docker-compose.yml ps
+```
+
+View collector logs:
+
+```powershell
+docker compose -f observability/docker-compose.yml logs -f otel-collector
+```
+
+Stop the stack:
+
+```powershell
+docker compose -f observability/docker-compose.yml down
+```
+
+Local endpoints:
+
+```text
+OpenTelemetry Collector OTLP gRPC: http://localhost:4317
+OpenTelemetry Collector OTLP HTTP: http://localhost:4318
+Jaeger UI: http://localhost:16686
+Grafana: http://localhost:3000
+```
+
+Grafana uses the default development login:
+
+```text
+admin / admin
+```
+
+The app is not instrumented yet. This stack is ready to receive OTLP traces in a
+future instrumentation phase.
+
+Each local black-box recorder file in `runs/` includes a `traceId` field. When
+an OpenTelemetry trace is active, use that value to find the matching trace:
+
+```text
+Jaeger: http://localhost:16686
+Grafana: Explore -> Tempo -> TraceID query
+```
+
+If telemetry is disabled, or no active span exists for the run, `traceId` is
+`null`.
+
 ## Build And Run
 
 Compile TypeScript:

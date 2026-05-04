@@ -35,6 +35,7 @@ type AgentRunRecord = {
   id: string;
   timestamp: string;
   mode: AgentRunMode;
+  traceId: string | null;
   prompt: string;
   events: AgentRunEvent[];
   filesRead: string[];
@@ -90,11 +91,13 @@ function sanitizeArgs(args: RecorderArguments): RecorderArguments {
 export function createBlackBoxRecorder(input: {
   prompt: string;
   mode?: AgentRunMode;
+  traceId?: string | null;
 }): BlackBoxRecorder {
   const record: AgentRunRecord = {
     id: randomUUID(),
     timestamp: now(),
     mode: input.mode ?? "normal",
+    traceId: input.traceId ?? null,
     prompt: truncate(sanitizeText(input.prompt)),
     events: [],
     filesRead: [],
