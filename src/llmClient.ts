@@ -1,4 +1,6 @@
+import { SpanStatusCode } from "@opentelemetry/api";
 import { tools } from "./tools/schemas.js";
+import { getTracer } from "./telemetry.js";
 
 export type ToolCall = {
   id?: string;
@@ -68,28 +70,57 @@ export async function sendMessagesToLlm(
   messages: ChatMessage[],
   options: SendMessagesOptions = {},
 ): Promise<AssistantMessage> {
-  const apiUrl = getRequiredEnv("LLM_API_URL");
-  const apiKey = getRequiredEnv("LLM_API_KEY");
-  const model = getRequiredEnv("LLM_MODEL");
   const includeTools = options.includeTools ?? true;
+  const span = getTracer().startSpan("llm.request");
 
-  const response = await fetch(apiUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      ...(includeTools ? { tools } : {}),
-    }),
-  });
+  span.setAttribute("llm.message_count", messages.length);
+  span.setAttribute("llm.tools_enabled", includeTools);
 
-  if (!response.ok) {
-    throw new Error(`LLM API request failed with status ${response.status}`);
+  try {
+    const apiUrl = getRequiredEnv("LLM_API_URL");
+    const apiKey = getRequiredEnv("LLM_API_KEY");
+    const model = getRequiredEnv("LLM_MODEL");
+
+    span.setAttribute("llm.model", model);
+
+    const response = await fetch(apiUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        ...(includeTools ? { tools } : {}),
+      }),
+    });
+
+    span.setAttribute("http.response.status_code", response.status);
+
+    if (!response.ok) {
+      throw new Error(`LLM API request failed with status ${response.status}`);
+    }
+
+    const data = (await response.json()) as LlmResponse;
+    const assistantMessage = parseAssistantMessage(data);
+
+    span.setAttribute("llm.response_content_length", assistantMessage.content?.length ?? 0);
+    span.setAttribute("llm.tool_call_count", assistantMessage.tool_calls?.length ?? 0);
+    span.setStatus({ code: SpanStatusCode.OK });
+
+    return assistantMessage;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+
+    span.recordException(error instanceof Error ? error : new Error(message));
+    span.setStatus({
+      code: SpanStatusCode.ERROR,
+      message,
+    });
+
+    throw error;
+  } finally {
+    span.end();
   }
-
-  const data = (await response.json()) as LlmResponse;
-  return parseAssistantMessage(data);
 }

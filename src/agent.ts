@@ -1,4 +1,9 @@
-import { type Span, SpanStatusCode } from "@opentelemetry/api";
+import {
+  context as otelContext,
+  type Span,
+  SpanStatusCode,
+  trace,
+} from "@opentelemetry/api";
 import { type ChatMessage, type ToolCall, sendMessagesToLlm } from "./llmClient.js";
 import {
   type AgentRunMode,
@@ -11,7 +16,7 @@ import { readTool } from "./tools/readTool.js";
 import { searchFilesTool } from "./tools/searchFilesTool.js";
 import { typeCheckTool } from "./tools/typeCheckTool.js";
 import { writeTool } from "./tools/writeTool.js";
-import { getActiveTraceId, getTracer } from "./telemetry.js";
+import { getTracer } from "./telemetry.js";
 import {
   logAgentDebug,
   logToolError,
@@ -280,6 +285,16 @@ function failToolSpan(span: Span, durationMs: number, error: unknown): void {
     message: redactSecretValues(message),
   });
   span.end();
+}
+
+function getValidTraceId(span: Span): string | null {
+  const traceId = span.spanContext().traceId;
+
+  if (!traceId || /^0+$/.test(traceId)) {
+    return null;
+  }
+
+  return traceId;
 }
 
 async function saveRecorderSafely(recorder: BlackBoxRecorder): Promise<void> {
@@ -564,79 +579,99 @@ async function executeToolCall(
 
 export async function runAgent(prompt: string, options: RunAgentOptions = {}): Promise<string> {
   const maxSteps = options.maxSteps ?? MAX_AGENT_STEPS;
-  const recorder = createBlackBoxRecorder({
-    prompt,
-    mode: options.mode,
-    traceId: getActiveTraceId(),
-  });
-  const messages: ChatMessage[] = [
-    {
-      role: "user",
-      content: prompt,
-    },
-  ];
+  const agentSpan = getTracer().startSpan("agent.run");
+  const activeContext = trace.setSpan(otelContext.active(), agentSpan);
 
-  try {
-    emitAgentEvent(options.onEvent, {
-      type: "agent_started",
-      prompt: sanitizeEventText(prompt),
+  agentSpan.setAttribute("agent.mode", options.mode ?? "normal");
+  agentSpan.setAttribute("agent.prompt_length", prompt.length);
+  agentSpan.setAttribute("agent.max_steps", maxSteps === null ? "unlimited" : maxSteps);
+
+  return otelContext.with(activeContext, async () => {
+    const recorder = createBlackBoxRecorder({
+      prompt,
+      mode: options.mode,
+      traceId: getValidTraceId(agentSpan),
     });
+    const messages: ChatMessage[] = [
+      {
+        role: "user",
+        content: prompt,
+      },
+    ];
 
-    for (let step = 0; maxSteps === null || step < maxSteps; step += 1) {
-      const assistantMessage = await sendMessagesToLlm(messages);
-      messages.push(assistantMessage);
+    try {
+      emitAgentEvent(options.onEvent, {
+        type: "agent_started",
+        prompt: sanitizeEventText(prompt),
+      });
 
-      const toolCalls = assistantMessage.tool_calls ?? [];
-      const finalContent = assistantMessage.content?.trim();
+      for (let step = 0; maxSteps === null || step < maxSteps; step += 1) {
+        agentSpan.setAttribute("agent.current_step", step + 1);
 
-      if (toolCalls.length === 0) {
-        if (!finalContent) {
-          const agentStep = step + 1;
+        const assistantMessage = await sendMessagesToLlm(messages);
+        messages.push(assistantMessage);
 
-          logAgentDebug("empty assistant response", {
-            step: agentStep,
-            message_count: messages.length,
-            roles: getMessageRoleSummary(messages),
+        const toolCalls = assistantMessage.tool_calls ?? [];
+        const finalContent = assistantMessage.content?.trim();
+
+        if (toolCalls.length === 0) {
+          if (!finalContent) {
+            const agentStep = step + 1;
+
+            logAgentDebug("empty assistant response", {
+              step: agentStep,
+              message_count: messages.length,
+              roles: getMessageRoleSummary(messages),
+            });
+
+            throw new Error(
+              `The model returned an empty response at agent step ${agentStep}: no assistant content and no tool calls. Try a different model or a shorter prompt.`,
+            );
+          }
+
+          recorder.recordFinalAnswer(finalContent);
+          agentSpan.setAttribute("agent.final_answer_length", finalContent.length);
+          agentSpan.setStatus({ code: SpanStatusCode.OK });
+          emitAgentEvent(options.onEvent, {
+            type: "agent_completed",
+            finalAnswer: sanitizeEventText(finalContent),
           });
-
-          throw new Error(
-            `The model returned an empty response at agent step ${agentStep}: no assistant content and no tool calls. Try a different model or a shorter prompt.`,
-          );
+          await saveRecorderSafely(recorder);
+          return finalContent;
         }
 
-        recorder.recordFinalAnswer(finalContent);
-        emitAgentEvent(options.onEvent, {
-          type: "agent_completed",
-          finalAnswer: sanitizeEventText(finalContent),
-        });
-        await saveRecorderSafely(recorder);
-        return finalContent;
-      }
+        for (const toolCall of toolCalls) {
+          if (!toolCall.id) {
+            throw new Error("Tool call is missing an id.");
+          }
 
-      for (const toolCall of toolCalls) {
-        if (!toolCall.id) {
-          throw new Error("Tool call is missing an id.");
+          const toolResult = await executeToolCall(toolCall, recorder, options.onEvent);
+
+          messages.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: toolResult,
+          });
         }
-
-        const toolResult = await executeToolCall(toolCall, recorder, options.onEvent);
-
-        messages.push({
-          role: "tool",
-          tool_call_id: toolCall.id,
-          content: toolResult,
-        });
       }
+
+      throw new Error(`Agent stopped after reaching the maximum of ${maxSteps} steps.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      recorder.recordError(message);
+      agentSpan.recordException(error instanceof Error ? error : new Error(message));
+      agentSpan.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: redactSecretValues(message),
+      });
+      emitAgentEvent(options.onEvent, {
+        type: "agent_error",
+        error: sanitizeEventText(message),
+      });
+      await saveRecorderSafely(recorder);
+      throw error;
+    } finally {
+      agentSpan.end();
     }
-
-    throw new Error(`Agent stopped after reaching the maximum of ${maxSteps} steps.`);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    recorder.recordError(message);
-    emitAgentEvent(options.onEvent, {
-      type: "agent_error",
-      error: sanitizeEventText(message),
-    });
-    await saveRecorderSafely(recorder);
-    throw error;
-  }
+  });
 }

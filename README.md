@@ -308,8 +308,22 @@ Grafana uses the default development login:
 admin / admin
 ```
 
-The app is not instrumented yet. This stack is ready to receive OTLP traces in a
-future instrumentation phase.
+When `OTEL_ENABLED=true`, the app exports OpenTelemetry traces to the collector.
+The current trace hierarchy is:
+
+```text
+agent.run
+  llm.request
+  tool.Read
+  tool.Write
+  tool.Bash
+  tool.SearchFiles
+  tool.TypeCheck
+  tool.LSP
+```
+
+Span attributes only store safe metadata such as lengths, durations, tool names,
+file paths, search queries, and redacted shell commands.
 
 Each local black-box recorder file in `runs/` includes a `traceId` field. When
 an OpenTelemetry trace is active, use that value to find the matching trace:
@@ -319,8 +333,7 @@ Jaeger: http://localhost:16686
 Grafana: Explore -> Tempo -> TraceID query
 ```
 
-If telemetry is disabled, or no active span exists for the run, `traceId` is
-`null`.
+If telemetry is disabled, `traceId` is `null`.
 
 ## Build And Run
 
