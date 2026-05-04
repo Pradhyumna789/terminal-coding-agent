@@ -1,6 +1,7 @@
 import { SpanStatusCode } from "@opentelemetry/api";
 import { tools } from "./tools/schemas.js";
 import { getTracer } from "./telemetry.js";
+import { redactSecretValues } from "./traceLogger.js";
 
 export type ToolCall = {
   id?: string;
@@ -116,7 +117,7 @@ export async function sendMessagesToLlm(
     span.recordException(error instanceof Error ? error : new Error(message));
     span.setStatus({
       code: SpanStatusCode.ERROR,
-      message,
+      message: redactSecretValues(message),
     });
 
     throw error;
