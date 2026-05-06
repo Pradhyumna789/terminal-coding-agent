@@ -62,6 +62,15 @@ Follow this order:
    - implementation file changes
    - verification command and result
 
+Tool-use rules for this project:
+- Use SearchFiles for file discovery instead of Bash.
+- Use Read to inspect exact files after discovering paths.
+- Use Write when tests or implementation files need to be created or changed.
+- Prefer TypeCheck for TypeScript verification.
+- If Bash is needed, use only one simple allowlisted command at a time, such as npm test, npm run typecheck, or npm run build.
+- Do not use Bash pipes, redirects, command chaining, command substitution, multiline commands, or compound shell expressions.
+- Do not use Bash to create, overwrite, move, copy, or delete files.
+
 If no test framework exists:
 - Do not invent a large setup silently.
 - Explain that no test framework exists.

@@ -1,4 +1,5 @@
 import { SeverityNumber } from "@opentelemetry/api-logs";
+import { type AgentIdentity } from "./multiAgent/types.js";
 import { emitTelemetryLog } from "./telemetry.js";
 
 type TraceArguments = Record<string, string | number>;
@@ -27,26 +28,51 @@ export function redactSecretValues(value: string): string {
     );
 }
 
-export function logToolStart(toolName: string, args: TraceArguments): void {
+export function logToolStart(
+  toolName: string,
+  args: TraceArguments,
+  identity?: AgentIdentity,
+): void {
   const safeArgs = redactSecretValues(JSON.stringify(args));
   console.error(
     `[tool] ${timestamp()} ${toolName} started ${safeArgs}`,
   );
-  emitTelemetryLog("tool_started", `${toolName} started.`, {
-    "tool.name": toolName,
-    "tool.args": safeArgs,
-  });
+  emitTelemetryLog(
+    "tool_started",
+    `${toolName} started.`,
+    {
+      "tool.name": toolName,
+      "tool.args": safeArgs,
+    },
+    SeverityNumber.INFO,
+    identity,
+  );
 }
 
-export function logToolSuccess(toolName: string, durationMs: number): void {
+export function logToolSuccess(
+  toolName: string,
+  durationMs: number,
+  identity?: AgentIdentity,
+): void {
   console.error(`[tool] ${timestamp()} ${toolName} success ${durationMs}ms`);
-  emitTelemetryLog("tool_success", `${toolName} succeeded.`, {
-    "tool.name": toolName,
-    "tool.duration_ms": durationMs,
-  });
+  emitTelemetryLog(
+    "tool_success",
+    `${toolName} succeeded.`,
+    {
+      "tool.name": toolName,
+      "tool.duration_ms": durationMs,
+    },
+    SeverityNumber.INFO,
+    identity,
+  );
 }
 
-export function logToolError(toolName: string, durationMs: number, errorMessage: string): void {
+export function logToolError(
+  toolName: string,
+  durationMs: number,
+  errorMessage: string,
+  identity?: AgentIdentity,
+): void {
   const safeMessage = redactSecretValues(errorMessage);
   console.error(
     `[tool] ${timestamp()} ${toolName} error ${durationMs}ms ${safeMessage}`,
@@ -60,13 +86,18 @@ export function logToolError(toolName: string, durationMs: number, errorMessage:
       "error.message": safeMessage,
     },
     SeverityNumber.ERROR,
+    identity,
   );
 }
 
-export function logAgentDebug(message: string, details: Record<string, string | number>): void {
+export function logAgentDebug(
+  message: string,
+  details: Record<string, string | number>,
+  identity?: AgentIdentity,
+): void {
   const safeDetails = redactSecretValues(JSON.stringify(details));
   console.error(`[agent] ${timestamp()} ${message} ${safeDetails}`);
   emitTelemetryLog("agent_debug", redactSecretValues(message), {
     "agent.details": safeDetails,
-  });
+  }, SeverityNumber.INFO, identity);
 }

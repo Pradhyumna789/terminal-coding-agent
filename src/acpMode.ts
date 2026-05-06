@@ -63,7 +63,7 @@ const ACP_CAPABILITIES: AcpCapabilities = {
     "GoToDefinition",
     "FindReferences",
   ],
-  modes: ["one-shot", "interactive", "spec-first", "tdd", "docs", "acp"],
+  modes: ["one-shot", "interactive", "spec-first", "tdd", "docs", "multi-agent", "acp"],
   supportsStreamingEvents: true,
 };
 

@@ -18,8 +18,13 @@ test("spec-first prompt is non-mutating and tool-free", () => {
 });
 
 test("TDD mode keeps unlimited max steps", () => {
+  const prompt = buildTddPrompt("Add a helper");
+
   assert.equal(TDD_AGENT_MAX_STEPS, null);
-  assert.match(buildTddPrompt("Add a helper"), /Create or update tests before implementation/);
+  assert.match(prompt, /Create or update tests before implementation/);
+  assert.match(prompt, /Use SearchFiles for file discovery instead of Bash/);
+  assert.match(prompt, /Do not use Bash pipes, redirects, command chaining/);
+  assert.match(prompt, /Use Write when tests or implementation files need to be created or changed/);
 });
 
 test("docs workflow ensures Mermaid and verifies generated markdown", async () => {

@@ -18,8 +18,10 @@ import { readTool } from "./tools/readTool.js";
 import { searchFilesTool, type SearchFilesOptions } from "./tools/searchFilesTool.js";
 import { typeCheckTool } from "./tools/typeCheckTool.js";
 import { writeTool } from "./tools/writeTool.js";
+import { type AgentIdentity } from "./multiAgent/types.js";
 import {
   emitTelemetryLog,
+  identityAttributes,
   recordAgentRunCompleted,
   recordAgentRunStarted,
   recordToolMetric,
@@ -87,6 +89,7 @@ type RunAgentOptions = {
   conversationMessageCountBeforeRun?: number;
   security?: SecurityOptions;
   workflowEvents?: WorkflowEvent[];
+  identity?: AgentIdentity;
 };
 
 function sanitizeEventText(value: string): string {
@@ -361,13 +364,18 @@ function getToolSpanName(toolName: string | undefined): string {
   return "tool.unknown";
 }
 
-function startToolSpan(toolName: string | undefined, toolCallId: string): Span {
+function startToolSpan(
+  toolName: string | undefined,
+  toolCallId: string,
+  identity?: AgentIdentity,
+): Span {
   const safeToolName = toolName ?? "unknown";
   const span = getTracer().startSpan(getToolSpanName(toolName));
 
   span.setAttribute("tool.name", safeToolName);
   span.setAttribute("tool.call_id", toolCallId);
-  recordToolMetric(safeToolName, "started");
+  span.setAttributes(identityAttributes(identity));
+  recordToolMetric(safeToolName, "started", undefined, identity);
 
   return span;
 }
@@ -376,15 +384,27 @@ function setToolFilePath(span: Span, filePath: string): void {
   span.setAttribute("tool.file_path", redactSecretValues(filePath));
 }
 
-function finishToolSpan(span: Span, toolName: string, durationMs: number, result: string): void {
+function finishToolSpan(
+  span: Span,
+  toolName: string,
+  durationMs: number,
+  result: string,
+  identity?: AgentIdentity,
+): void {
   span.setAttribute("tool.duration_ms", durationMs);
   span.setAttribute("tool.result_length", result.length);
   span.setStatus({ code: SpanStatusCode.OK });
-  recordToolMetric(toolName, "success", durationMs);
+  recordToolMetric(toolName, "success", durationMs, identity);
   span.end();
 }
 
-function failToolSpan(span: Span, toolName: string, durationMs: number, error: unknown): void {
+function failToolSpan(
+  span: Span,
+  toolName: string,
+  durationMs: number,
+  error: unknown,
+  identity?: AgentIdentity,
+): void {
   const message = error instanceof Error ? error.message : "Unknown error";
   const safeMessage = redactSecretValues(message);
 
@@ -394,7 +414,7 @@ function failToolSpan(span: Span, toolName: string, durationMs: number, error: u
     code: SpanStatusCode.ERROR,
     message: safeMessage,
   });
-  recordToolMetric(toolName, "error", durationMs);
+  recordToolMetric(toolName, "error", durationMs, identity);
   span.end();
 }
 
@@ -418,7 +438,10 @@ function getValidSpanId(span: Span): string | null {
   return spanId;
 }
 
-async function saveRecorderSafely(recorder: BlackBoxRecorder): Promise<void> {
+async function saveRecorderSafely(
+  recorder: BlackBoxRecorder,
+  identity?: AgentIdentity,
+): Promise<void> {
   try {
     await recorder.save();
   } catch (error) {
@@ -427,7 +450,7 @@ async function saveRecorderSafely(recorder: BlackBoxRecorder): Promise<void> {
     console.error(`[recorder] failed to save run: ${safeMessage}`);
     emitTelemetryLog("recorder_save_error", "Black-box recorder failed to save run record.", {
       "error.message": safeMessage,
-    });
+    }, undefined, identity);
   }
 }
 
@@ -452,6 +475,7 @@ async function executeToolCall(
   recorder: BlackBoxRecorder,
   onEvent?: AgentEventHandler,
   security?: SecurityOptions,
+  identity?: AgentIdentity,
 ): Promise<string> {
   if (!toolCall.id) {
     throw new Error("Tool call is missing an id.");
@@ -459,7 +483,7 @@ async function executeToolCall(
 
   const toolName = toolCall.function?.name;
   const startedAt = Date.now();
-  const span = startToolSpan(toolName, toolCall.id);
+  const span = startToolSpan(toolName, toolCall.id, identity);
   let spanEnded = false;
 
   try {
@@ -473,7 +497,7 @@ async function executeToolCall(
       });
     }
     setToolFilePath(span, filePath);
-    logToolStart("Read", { file_path: filePath });
+    logToolStart("Read", { file_path: filePath }, identity);
     emitAgentEvent(onEvent, {
       type: "tool_started",
       toolName: "Read",
@@ -486,8 +510,8 @@ async function executeToolCall(
       const rawResult = await readTool(filePath);
       const result = formatUntrustedFileContent(filePath, rawResult);
       const durationMs = Date.now() - startedAt;
-      logToolSuccess("Read", durationMs);
-      finishToolSpan(span, "Read", durationMs, result);
+      logToolSuccess("Read", durationMs, identity);
+      finishToolSpan(span, "Read", durationMs, result, identity);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -499,7 +523,7 @@ async function executeToolCall(
     } catch (error) {
       const durationMs = Date.now() - startedAt;
       const message = error instanceof Error ? error.message : "Unknown error";
-      logToolError("Read", durationMs, message);
+      logToolError("Read", durationMs, message, identity);
       emitAgentEvent(onEvent, {
         type: "tool_error",
         toolName: "Read",
@@ -525,7 +549,7 @@ async function executeToolCall(
     logToolStart("Write", {
       file_path: args.filePath,
       content_length: args.content.length,
-    });
+    }, identity);
     emitAgentEvent(onEvent, {
       type: "tool_started",
       toolName: "Write",
@@ -543,8 +567,8 @@ async function executeToolCall(
     try {
       const result = await writeTool(args.filePath, args.content);
       const durationMs = Date.now() - startedAt;
-      logToolSuccess("Write", durationMs);
-      finishToolSpan(span, "Write", durationMs, result);
+      logToolSuccess("Write", durationMs, identity);
+      finishToolSpan(span, "Write", durationMs, result, identity);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -556,7 +580,7 @@ async function executeToolCall(
     } catch (error) {
       const durationMs = Date.now() - startedAt;
       const message = error instanceof Error ? error.message : "Unknown error";
-      logToolError("Write", durationMs, message);
+      logToolError("Write", durationMs, message, identity);
       emitAgentEvent(onEvent, {
         type: "tool_error",
         toolName: "Write",
@@ -576,7 +600,7 @@ async function executeToolCall(
       details: { command: sanitizeEventText(command) },
     });
     span.setAttribute("tool.command_redacted", redactSecretValues(command));
-    logToolStart("Bash", { command: redactSecretValues(command) });
+    logToolStart("Bash", { command: redactSecretValues(command) }, identity);
     emitAgentEvent(onEvent, {
       type: "tool_started",
       toolName: "Bash",
@@ -588,8 +612,8 @@ async function executeToolCall(
     try {
       const result = await bashTool(command);
       const durationMs = Date.now() - startedAt;
-      logToolSuccess("Bash", durationMs);
-      finishToolSpan(span, "Bash", durationMs, result);
+      logToolSuccess("Bash", durationMs, identity);
+      finishToolSpan(span, "Bash", durationMs, result, identity);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -601,7 +625,7 @@ async function executeToolCall(
     } catch (error) {
       const durationMs = Date.now() - startedAt;
       const message = error instanceof Error ? error.message : "Unknown error";
-      logToolError("Bash", durationMs, message);
+      logToolError("Bash", durationMs, message, identity);
       emitAgentEvent(onEvent, {
         type: "tool_error",
         toolName: "Bash",
@@ -617,7 +641,7 @@ async function executeToolCall(
     span.setAttribute("tool.query", redactSecretValues(query));
     span.setAttribute("tool.search_text", options.searchText ?? false);
     span.setAttribute("tool.max_results", options.maxResults ?? 25);
-    logToolStart("SearchFiles", { query });
+    logToolStart("SearchFiles", { query }, identity);
     emitAgentEvent(onEvent, {
       type: "tool_started",
       toolName: "SearchFiles",
@@ -632,8 +656,8 @@ async function executeToolCall(
     try {
       const result = await searchFilesTool(query, options);
       const durationMs = Date.now() - startedAt;
-      logToolSuccess("SearchFiles", durationMs);
-      finishToolSpan(span, "SearchFiles", durationMs, result);
+      logToolSuccess("SearchFiles", durationMs, identity);
+      finishToolSpan(span, "SearchFiles", durationMs, result, identity);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -645,7 +669,7 @@ async function executeToolCall(
     } catch (error) {
       const durationMs = Date.now() - startedAt;
       const message = error instanceof Error ? error.message : "Unknown error";
-      logToolError("SearchFiles", durationMs, message);
+      logToolError("SearchFiles", durationMs, message, identity);
       emitAgentEvent(onEvent, {
         type: "tool_error",
         toolName: "SearchFiles",
@@ -658,7 +682,7 @@ async function executeToolCall(
 
   if (toolName === "TypeCheck") {
     span.setAttribute("tool.command_redacted", "npm run typecheck");
-    logToolStart("TypeCheck", { command: "npm run typecheck" });
+    logToolStart("TypeCheck", { command: "npm run typecheck" }, identity);
     emitAgentEvent(onEvent, {
       type: "tool_started",
       toolName: "TypeCheck",
@@ -669,8 +693,8 @@ async function executeToolCall(
     try {
       const result = await typeCheckTool();
       const durationMs = Date.now() - startedAt;
-      logToolSuccess("TypeCheck", durationMs);
-      finishToolSpan(span, "TypeCheck", durationMs, result);
+      logToolSuccess("TypeCheck", durationMs, identity);
+      finishToolSpan(span, "TypeCheck", durationMs, result, identity);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -684,7 +708,7 @@ async function executeToolCall(
     } catch (error) {
       const durationMs = Date.now() - startedAt;
       const message = error instanceof Error ? error.message : "Unknown error";
-      logToolError("TypeCheck", durationMs, message);
+      logToolError("TypeCheck", durationMs, message, identity);
       emitAgentEvent(onEvent, {
         type: "tool_error",
         toolName: "TypeCheck",
@@ -698,7 +722,7 @@ async function executeToolCall(
   if (toolName === "DocumentSymbols") {
     const filePath = parseDocumentSymbolsToolArguments(toolCall.function?.arguments);
     setToolFilePath(span, filePath);
-    logToolStart("DocumentSymbols", { file_path: filePath });
+    logToolStart("DocumentSymbols", { file_path: filePath }, identity);
     emitAgentEvent(onEvent, {
       type: "tool_started",
       toolName: "DocumentSymbols",
@@ -710,8 +734,8 @@ async function executeToolCall(
     try {
       const result = await documentSymbolsTool(filePath);
       const durationMs = Date.now() - startedAt;
-      logToolSuccess("DocumentSymbols", durationMs);
-      finishToolSpan(span, "DocumentSymbols", durationMs, result);
+      logToolSuccess("DocumentSymbols", durationMs, identity);
+      finishToolSpan(span, "DocumentSymbols", durationMs, result, identity);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -726,7 +750,7 @@ async function executeToolCall(
     } catch (error) {
       const durationMs = Date.now() - startedAt;
       const message = error instanceof Error ? error.message : "Unknown error";
-      logToolError("DocumentSymbols", durationMs, message);
+      logToolError("DocumentSymbols", durationMs, message, identity);
       emitAgentEvent(onEvent, {
         type: "tool_error",
         toolName: "DocumentSymbols",
@@ -744,7 +768,7 @@ async function executeToolCall(
       file_path: args.filePath,
       line: args.line,
       column: args.column,
-    });
+    }, identity);
     emitAgentEvent(onEvent, {
       type: "tool_started",
       toolName: "GoToDefinition",
@@ -764,8 +788,8 @@ async function executeToolCall(
     try {
       const result = await goToDefinitionTool(args.filePath, args.line, args.column);
       const durationMs = Date.now() - startedAt;
-      logToolSuccess("GoToDefinition", durationMs);
-      finishToolSpan(span, "GoToDefinition", durationMs, result);
+      logToolSuccess("GoToDefinition", durationMs, identity);
+      finishToolSpan(span, "GoToDefinition", durationMs, result, identity);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -777,7 +801,7 @@ async function executeToolCall(
     } catch (error) {
       const durationMs = Date.now() - startedAt;
       const message = error instanceof Error ? error.message : "Unknown error";
-      logToolError("GoToDefinition", durationMs, message);
+      logToolError("GoToDefinition", durationMs, message, identity);
       emitAgentEvent(onEvent, {
         type: "tool_error",
         toolName: "GoToDefinition",
@@ -795,7 +819,7 @@ async function executeToolCall(
       file_path: args.filePath,
       line: args.line,
       column: args.column,
-    });
+    }, identity);
     emitAgentEvent(onEvent, {
       type: "tool_started",
       toolName: "FindReferences",
@@ -815,8 +839,8 @@ async function executeToolCall(
     try {
       const result = await findReferencesTool(args.filePath, args.line, args.column);
       const durationMs = Date.now() - startedAt;
-      logToolSuccess("FindReferences", durationMs);
-      finishToolSpan(span, "FindReferences", durationMs, result);
+      logToolSuccess("FindReferences", durationMs, identity);
+      finishToolSpan(span, "FindReferences", durationMs, result, identity);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -828,7 +852,7 @@ async function executeToolCall(
     } catch (error) {
       const durationMs = Date.now() - startedAt;
       const message = error instanceof Error ? error.message : "Unknown error";
-      logToolError("FindReferences", durationMs, message);
+      logToolError("FindReferences", durationMs, message, identity);
       emitAgentEvent(onEvent, {
         type: "tool_error",
         toolName: "FindReferences",
@@ -844,7 +868,7 @@ async function executeToolCall(
     const message = error instanceof Error ? error.message : "Unknown error";
     recorder.recordToolError(toolName ?? "unknown", message);
     if (!spanEnded) {
-      failToolSpan(span, toolName ?? "unknown", Date.now() - startedAt, error);
+      failToolSpan(span, toolName ?? "unknown", Date.now() - startedAt, error, identity);
     }
 
     throw error;
@@ -885,15 +909,17 @@ export async function runAgentWithMessages(
   ensureSecuritySystemMessage(messages);
   const maxSteps = options.maxSteps ?? MAX_AGENT_STEPS;
   const mode = options.mode ?? "normal";
+  const identity = options.identity;
   const startedAt = Date.now();
   const agentSpan = getTracer().startSpan("agent.run");
   const activeContext = trace.setSpan(otelContext.active(), agentSpan);
 
-  recordAgentRunStarted(mode);
+  recordAgentRunStarted(mode, identity);
   agentSpan.setAttribute("agent.mode", mode);
   agentSpan.setAttribute("agent.prompt_length", promptForRecord.length);
   agentSpan.setAttribute("agent.max_steps", maxSteps === null ? "unlimited" : maxSteps);
   agentSpan.setAttribute("agent.message_count_start", messages.length);
+  agentSpan.setAttributes(identityAttributes(identity));
 
   return otelContext.with(activeContext, async () => {
     const recorder = createBlackBoxRecorder({
@@ -902,6 +928,7 @@ export async function runAgentWithMessages(
       traceId: getValidTraceId(agentSpan),
       rootSpanId: getValidSpanId(agentSpan),
       conversationMessageCountBeforeRun: options.conversationMessageCountBeforeRun,
+      identity,
     });
     recordWorkflowEvents(recorder, options.workflowEvents ?? []);
 
@@ -917,6 +944,7 @@ export async function runAgentWithMessages(
         recorder.recordLlmRequest();
         const assistantMessage = await sendMessagesToLlm(messages, {
           includeTools: options.includeTools ?? true,
+          identity,
         });
         messages.push(assistantMessage);
 
@@ -931,7 +959,7 @@ export async function runAgentWithMessages(
               step: agentStep,
               message_count: messages.length,
               roles: getMessageRoleSummary(messages),
-            });
+            }, identity);
 
             throw new Error(
               `The model returned an empty response at agent step ${agentStep}: no assistant content and no tool calls. Try a different model or a shorter prompt.`,
@@ -947,15 +975,16 @@ export async function runAgentWithMessages(
             finalizeSpan.setAttribute("agent.mode", mode);
             finalizeSpan.setAttribute("agent.status", "success");
             finalizeSpan.setAttribute("agent.final_answer_length", finalContent.length);
+            finalizeSpan.setAttributes(identityAttributes(identity));
             finalizeSpan.setStatus({ code: SpanStatusCode.OK });
             finalizeSpan.end();
           });
-          recordAgentRunCompleted(mode, "success", Date.now() - startedAt);
+          recordAgentRunCompleted(mode, "success", Date.now() - startedAt, identity);
           emitAgentEvent(options.onEvent, {
             type: "agent_completed",
             finalAnswer: sanitizeEventText(finalContent),
           });
-          await saveRecorderSafely(recorder);
+          await saveRecorderSafely(recorder, identity);
           return finalContent;
         }
 
@@ -969,6 +998,7 @@ export async function runAgentWithMessages(
             recorder,
             options.onEvent,
             options.security,
+            identity,
           );
 
           messages.push({
@@ -993,18 +1023,19 @@ export async function runAgentWithMessages(
       getTracer().startActiveSpan("agent.finalize", (finalizeSpan) => {
         finalizeSpan.setAttribute("agent.mode", mode);
         finalizeSpan.setAttribute("agent.status", "error");
+        finalizeSpan.setAttributes(identityAttributes(identity));
         finalizeSpan.setStatus({
           code: SpanStatusCode.ERROR,
           message: safeMessage,
         });
         finalizeSpan.end();
       });
-      recordAgentRunCompleted(mode, "error", Date.now() - startedAt);
+      recordAgentRunCompleted(mode, "error", Date.now() - startedAt, identity);
       emitAgentEvent(options.onEvent, {
         type: "agent_error",
         error: sanitizeEventText(message),
       });
-      await saveRecorderSafely(recorder);
+      await saveRecorderSafely(recorder, identity);
       throw error;
     } finally {
       agentSpan.end();

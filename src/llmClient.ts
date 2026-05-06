@@ -1,6 +1,12 @@
 import { SpanStatusCode } from "@opentelemetry/api";
 import { tools } from "./tools/schemas.js";
-import { emitTelemetryLog, getTracer, recordLlmMetric } from "./telemetry.js";
+import {
+  emitTelemetryLog,
+  getTracer,
+  identityAttributes,
+  recordLlmMetric,
+} from "./telemetry.js";
+import { type AgentIdentity } from "./multiAgent/types.js";
 import { redactSecretValues } from "./traceLogger.js";
 
 export type ToolCall = {
@@ -45,6 +51,7 @@ type LlmResponse = {
 
 type SendMessagesOptions = {
   includeTools?: boolean;
+  identity?: AgentIdentity;
 };
 
 function getRequiredEnv(name: string): string {
@@ -78,9 +85,11 @@ export async function sendMessagesToLlm(
   const includeTools = options.includeTools ?? true;
   const span = getTracer().startSpan("llm.request");
   const startedAt = Date.now();
+  const identity = options.identity;
 
   span.setAttribute("llm.message_count", messages.length);
   span.setAttribute("llm.tools_enabled", includeTools);
+  span.setAttributes(identityAttributes(identity));
 
   try {
     const apiUrl = getRequiredEnv("LLM_API_URL");
@@ -114,12 +123,12 @@ export async function sendMessagesToLlm(
     span.setAttribute("llm.response_content_length", assistantMessage.content?.length ?? 0);
     span.setAttribute("llm.tool_call_count", assistantMessage.tool_calls?.length ?? 0);
     span.setStatus({ code: SpanStatusCode.OK });
-    recordLlmMetric("success", Date.now() - startedAt, includeTools);
+    recordLlmMetric("success", Date.now() - startedAt, includeTools, identity);
     emitTelemetryLog("llm_request_success", "LLM request completed.", {
       "llm.tools_enabled": includeTools,
       "llm.message_count": messages.length,
       "llm.tool_call_count": assistantMessage.tool_calls?.length ?? 0,
-    });
+    }, undefined, identity);
 
     return assistantMessage;
   } catch (error) {
@@ -131,11 +140,11 @@ export async function sendMessagesToLlm(
       code: SpanStatusCode.ERROR,
       message: safeMessage,
     });
-    recordLlmMetric("error", Date.now() - startedAt, includeTools);
+    recordLlmMetric("error", Date.now() - startedAt, includeTools, identity);
     emitTelemetryLog("llm_request_error", "LLM request failed.", {
       "llm.tools_enabled": includeTools,
       "error.message": safeMessage,
-    });
+    }, undefined, identity);
 
     throw error;
   } finally {

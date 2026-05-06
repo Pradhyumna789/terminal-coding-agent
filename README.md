@@ -111,6 +111,69 @@ agent> exit
 `/history` prints the current stored message count, `/reset` clears conversation
 memory, `clear` or `cls` clears the screen, and `exit` or `quit` closes the CLI.
 
+## Parallel Multi-Agent Mode
+
+Multi-agent mode runs four read-only specialist agents in parallel over the same
+task:
+
+- QA Agent (`qa-agent`, role `qa`)
+- Testing Agent (`tester-agent`, role `test`)
+- Developer Agent (`developer-agent`, role `dev`)
+- Review Agent (`reviewer-agent`, role `review`)
+
+Run it with:
+
+```powershell
+npm run dev -- --multi-agent --prompt "Analyze how to add parallel multi-agent orchestration with separate observability to this codebase."
+```
+
+Expected output starts with:
+
+```text
+Parallel Multi-Agent Result
+
+QA Agent:
+...
+
+Testing Agent:
+...
+
+Developer Agent:
+...
+
+Review Agent:
+...
+
+Orchestration ID: <uuid>
+```
+
+V1 multi-agent mode is intentionally read-only. It blocks `Write` and `Bash`
+through the security policy so parallel agents can inspect the same project
+without racing to mutate files. Each agent gets a separate conversation state
+and a separate black-box recorder file under `runs/`.
+
+When OpenTelemetry is enabled, all in-process agents keep the same resource
+service name:
+
+```text
+service.name = terminal-coding-agent
+```
+
+Agents are distinguished with span, log, and metric attributes:
+
+```text
+orchestration.id=<uuid>
+agent.id=qa-agent
+agent.name=QA Agent
+agent.role=qa
+agent.mode=multi-agent
+```
+
+Use `orchestration.id`, `agent.id`, or `agent.role` to filter in Jaeger,
+Grafana Tempo, Prometheus, and Loki. A future worker-process mode could use
+separate service names such as `terminal-coding-agent-qa`, but v1 keeps a single
+global SDK and service name.
+
 ## Security Model
 
 The agent uses safe defaults around local tools:
@@ -328,7 +391,7 @@ returns:
 returns:
 
 ```json
-{"type":"capabilities_result","id":"c1","capabilities":{"tools":["Read","Write","Bash","SearchFiles","TypeCheck","DocumentSymbols","GoToDefinition","FindReferences"],"modes":["one-shot","interactive","spec-first","tdd","docs","acp"],"supportsStreamingEvents":true}}
+{"type":"capabilities_result","id":"c1","capabilities":{"tools":["Read","Write","Bash","SearchFiles","TypeCheck","DocumentSymbols","GoToDefinition","FindReferences"],"modes":["one-shot","interactive","spec-first","tdd","docs","multi-agent","acp"],"supportsStreamingEvents":true}}
 ```
 
 Real ACP compatibility mode is available separately:

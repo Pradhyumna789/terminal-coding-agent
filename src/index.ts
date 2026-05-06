@@ -12,6 +12,10 @@ import {
 import { buildDocsPrompt, runDocsMode } from "./docsMode.js";
 import { type ChatMessage } from "./llmClient.js";
 import {
+  formatMultiAgentResult,
+  runMultiAgentOrchestration,
+} from "./multiAgent/orchestrator.js";
+import {
   type SecurityOptions,
   type ToolApprovalRequest,
 } from "./securityPolicy.js";
@@ -36,6 +40,8 @@ const SECURITY_FLAGS = new Set([
   "--allow-bash",
   "--allow-sensitive-read",
 ]);
+const MODE_FLAGS = new Set(["--spec-first", "--tdd", "--acp", "--acp-real", "--multi-agent"]);
+const NON_PROMPT_FLAGS = new Set([...SECURITY_FLAGS, ...MODE_FLAGS]);
 
 function getPromptFromArgs(args: string[]): string | null {
   const promptWithEquals = args.find((arg) => arg.startsWith("--prompt="));
@@ -53,7 +59,7 @@ function getPromptFromArgs(args: string[]): string | null {
 
   const promptParts = args
     .slice(promptFlagIndex + 1)
-    .filter((arg) => !SECURITY_FLAGS.has(arg));
+    .filter((arg) => !NON_PROMPT_FLAGS.has(arg));
   const prompt = promptParts.join(" ").trim();
 
   if (!prompt) {
@@ -77,6 +83,10 @@ function hasAcpFlag(args: string[]): boolean {
 
 function hasAcpRealFlag(args: string[]): boolean {
   return args.includes("--acp-real");
+}
+
+function hasMultiAgentFlag(args: string[]): boolean {
+  return args.includes("--multi-agent");
 }
 
 function hasYesFlag(args: string[]): boolean {
@@ -104,6 +114,7 @@ function printUsage(): void {
   console.error('   or: npm run dev -- -p "your prompt here"');
   console.error('   or: npm run dev -- --spec-first --prompt "your task here"');
   console.error('   or: npm run dev -- --tdd --prompt "your task here"');
+  console.error('   or: npm run dev -- --multi-agent --prompt "your task here"');
   console.error("   or: npm run dev -- --acp");
   console.error("   or: npm run dev -- --acp-real");
   console.error("Security flags: --yes --allow-bash --allow-sensitive-read --deny-tools");
@@ -167,6 +178,11 @@ async function runTddOneShot(task: string, security: SecurityOptions): Promise<v
 async function runDocsOneShot(topic: string, security: SecurityOptions): Promise<void> {
   const finalAnswer = await runDocsMode(topic, security);
   console.log(finalAnswer);
+}
+
+async function runMultiAgentOneShot(task: string, security: SecurityOptions): Promise<void> {
+  const result = await runMultiAgentOrchestration(task, security);
+  console.log(formatMultiAgentResult(result));
 }
 
 function createBaseSecurityOptions(args: string[]): SecurityOptions {
@@ -435,28 +451,40 @@ async function main(): Promise<void> {
   const prompt = getPromptFromArgs(args);
   const acp = hasAcpFlag(args);
   const acpReal = hasAcpRealFlag(args);
+  const multiAgent = hasMultiAgentFlag(args);
   const stdinIsPiped = input.isTTY !== true;
   const specFirst = hasSpecFirstFlag(args);
   const tdd = hasTddFlag(args);
   const security = createBaseSecurityOptions(args);
+
+  if (multiAgent && (acp || acpReal)) {
+    console.error("Use --multi-agent separately from --acp or --acp-real.");
+    process.exitCode = 1;
+    return;
+  }
+
+  if ([specFirst, tdd, multiAgent].filter(Boolean).length > 1) {
+    console.error("Use only one of --spec-first, --tdd, or --multi-agent.");
+    process.exitCode = 1;
+    return;
+  }
 
   if (acpReal) {
     await runAcpRealMode(security);
     return;
   }
 
-  if (acp || (stdinIsPiped && !prompt)) {
+  if (!multiAgent && (acp || (stdinIsPiped && !prompt))) {
     await runAcpMode(security);
     return;
   }
 
-  if (specFirst && tdd) {
-    console.error("Use either --spec-first or --tdd, not both.");
-    process.exitCode = 1;
-    return;
-  }
-
   if (prompt) {
+    if (multiAgent) {
+      await runMultiAgentOneShot(prompt, security);
+      return;
+    }
+
     if (specFirst) {
       await runSpecFirstOneShot(prompt, security);
       return;
@@ -468,6 +496,12 @@ async function main(): Promise<void> {
     }
 
     await runOneShot(prompt, security);
+    return;
+  }
+
+  if (multiAgent) {
+    printUsage();
+    process.exitCode = 1;
     return;
   }
 

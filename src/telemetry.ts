@@ -11,6 +11,7 @@ import {
   ATTR_SERVICE_NAME,
   ATTR_SERVICE_VERSION,
 } from "@opentelemetry/semantic-conventions";
+import { type AgentIdentity } from "./multiAgent/types.js";
 
 const DEFAULT_SERVICE_NAME = "terminal-coding-agent";
 const DEFAULT_SERVICE_VERSION = "0.1.0";
@@ -143,6 +144,30 @@ function normalizeAttributes(attributes: Attributes): Attributes {
   return normalized;
 }
 
+export function identityAttributes(identity?: AgentIdentity): Attributes {
+  if (!identity) {
+    return {};
+  }
+
+  return {
+    "orchestration.id": identity.orchestrationId,
+    "agent.id": identity.agentId,
+    "agent.name": identity.agentName,
+    "agent.role": identity.agentRole,
+    "agent.mode": identity.agentMode,
+  };
+}
+
+export function withIdentityAttributes(
+  attributes: Attributes,
+  identity?: AgentIdentity,
+): Attributes {
+  return normalizeAttributes({
+    ...attributes,
+    ...identityAttributes(identity),
+  });
+}
+
 function errorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim()) {
     return error.message;
@@ -224,42 +249,49 @@ export function emitTelemetryLog(
   body: string,
   attributes: Attributes = {},
   severityNumber = SeverityNumber.INFO,
+  identity?: AgentIdentity,
 ): void {
   getLogger().emit({
     eventName,
     severityNumber,
     severityText: severityNumber >= SeverityNumber.ERROR ? "ERROR" : "INFO",
     body,
-    attributes: normalizeAttributes(attributes),
+    attributes: withIdentityAttributes(attributes, identity),
   });
 }
 
-export function recordAgentRunStarted(mode: string): void {
-  const attrs = { "agent.mode": mode };
+export function recordAgentRunStarted(mode: string, identity?: AgentIdentity): void {
+  const attrs = withIdentityAttributes({ "agent.mode": mode }, identity);
   const telemetry = getInstruments();
   telemetry.agentRuns.add(1, attrs);
   telemetry.activeAgentRuns.add(1, attrs);
-  emitTelemetryLog("agent_started", "Agent run started.", attrs);
+  emitTelemetryLog("agent_started", "Agent run started.", attrs, SeverityNumber.INFO, identity);
 }
 
 export function recordAgentRunCompleted(
   mode: string,
   status: "success" | "error",
   durationMs: number,
+  identity?: AgentIdentity,
 ): void {
-  const attrs = { "agent.mode": mode, status };
+  const attrs = withIdentityAttributes({ "agent.mode": mode, status }, identity);
   const telemetry = getInstruments();
   telemetry.agentRunDuration.record(durationMs, attrs);
-  telemetry.activeAgentRuns.add(-1, { "agent.mode": mode });
-  emitTelemetryLog(`agent_${status}`, `Agent run ${status}.`, attrs);
+  telemetry.activeAgentRuns.add(-1, withIdentityAttributes({ "agent.mode": mode }, identity));
+  emitTelemetryLog(`agent_${status}`, `Agent run ${status}.`, attrs, SeverityNumber.INFO, identity);
 }
 
-export function recordToolMetric(toolName: string, status: Status, durationMs?: number): void {
-  const attrs = { "tool.name": toolName, status };
+export function recordToolMetric(
+  toolName: string,
+  status: Status,
+  durationMs?: number,
+  identity?: AgentIdentity,
+): void {
+  const attrs = withIdentityAttributes({ "tool.name": toolName, status }, identity);
   const telemetry = getInstruments();
 
   if (status === "started") {
-    telemetry.toolCalls.add(1, { "tool.name": toolName });
+    telemetry.toolCalls.add(1, withIdentityAttributes({ "tool.name": toolName }, identity));
     return;
   }
 
@@ -276,10 +308,14 @@ export function recordLlmMetric(
   status: "success" | "error",
   durationMs: number,
   toolsEnabled: boolean,
+  identity?: AgentIdentity,
 ): void {
-  const attrs = { status, "llm.tools_enabled": toolsEnabled };
+  const attrs = withIdentityAttributes({ status, "llm.tools_enabled": toolsEnabled }, identity);
   const telemetry = getInstruments();
-  telemetry.llmRequests.add(1, { "llm.tools_enabled": toolsEnabled });
+  telemetry.llmRequests.add(
+    1,
+    withIdentityAttributes({ "llm.tools_enabled": toolsEnabled }, identity),
+  );
   telemetry.llmRequestDuration.record(durationMs, attrs);
 
   if (status === "error") {
@@ -316,14 +352,15 @@ export function recordWorkflowPhaseMetric(
   name: string,
   eventType: "started" | "completed" | "verification",
   status?: "passed" | "failed",
+  identity?: AgentIdentity,
 ): void {
-  const attrs = normalizeAttributes({
+  const attrs = withIdentityAttributes({
     "workflow.phase": name,
     "workflow.event": eventType,
     status,
-  });
+  }, identity);
   getInstruments().workflowPhases.add(1, attrs);
-  emitTelemetryLog("workflow_phase", "Workflow phase event.", attrs);
+  emitTelemetryLog("workflow_phase", "Workflow phase event.", attrs, SeverityNumber.INFO, identity);
 }
 
 export function recordDoneCriteriaMetric(name: string, passed: boolean, skipped: boolean): void {

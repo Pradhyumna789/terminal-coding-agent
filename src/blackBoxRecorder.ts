@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { redactSecretValues } from "./traceLogger.js";
 import { emitTelemetryLog } from "./telemetry.js";
+import { type AgentIdentity } from "./multiAgent/types.js";
 
 export type AgentRunMode =
   | "normal"
@@ -11,7 +12,8 @@ export type AgentRunMode =
   | "tdd"
   | "docs"
   | "acp"
-  | "acp-real";
+  | "acp-real"
+  | "multi-agent";
 
 type RecorderArguments = Record<string, string | number>;
 
@@ -67,6 +69,13 @@ type AgentRunRecord = {
   id: string;
   timestamp: string;
   mode: AgentRunMode;
+  orchestrationId?: string;
+  agent?: {
+    id: string;
+    name: string;
+    role: string;
+    mode: "multi-agent";
+  };
   traceId: string | null;
   prompt: string;
   conversationMessageCountBeforeRun?: number;
@@ -144,6 +153,7 @@ export function createBlackBoxRecorder(input: {
   traceId?: string | null;
   rootSpanId?: string | null;
   conversationMessageCountBeforeRun?: number;
+  identity?: AgentIdentity;
 }): BlackBoxRecorder {
   const startedAt = Date.now();
   const traceId = input.traceId ?? null;
@@ -151,6 +161,15 @@ export function createBlackBoxRecorder(input: {
     id: randomUUID(),
     timestamp: now(),
     mode: input.mode ?? "normal",
+    orchestrationId: input.identity?.orchestrationId,
+    agent: input.identity
+      ? {
+          id: input.identity.agentId,
+          name: input.identity.agentName,
+          role: input.identity.agentRole,
+          mode: input.identity.agentMode,
+        }
+      : undefined,
     traceId,
     prompt: truncate(sanitizeText(input.prompt)),
     conversationMessageCountBeforeRun: input.conversationMessageCountBeforeRun,
@@ -269,7 +288,9 @@ export function createBlackBoxRecorder(input: {
     },
     async save() {
       const runsDirectory = join(process.cwd(), "runs");
-      const fileName = `${safeTimestamp()}-${record.mode}-${record.id}.json`;
+      const fileName = record.agent
+        ? `${safeTimestamp()}-${record.mode}-${record.agent.id}-${record.id}.json`
+        : `${safeTimestamp()}-${record.mode}-${record.id}.json`;
 
       record.observability.durationMs = Date.now() - startedAt;
       await mkdir(runsDirectory, { recursive: true });
@@ -280,7 +301,7 @@ export function createBlackBoxRecorder(input: {
         "recorder.tool_call_count": record.observability.toolCallCount,
         "recorder.tool_error_count": record.observability.toolErrorCount,
         "recorder.llm_request_count": record.observability.llmRequestCount,
-      });
+      }, undefined, input.identity);
     },
   };
 }
