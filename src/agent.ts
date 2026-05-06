@@ -12,11 +12,21 @@ import {
 } from "./blackBoxRecorder.js";
 import { bashTool } from "./tools/bashTool.js";
 import { documentSymbolsTool } from "./tools/documentSymbolsTool.js";
+import { findReferencesTool } from "./tools/findReferencesTool.js";
+import { goToDefinitionTool } from "./tools/goToDefinitionTool.js";
 import { readTool } from "./tools/readTool.js";
-import { searchFilesTool } from "./tools/searchFilesTool.js";
+import { searchFilesTool, type SearchFilesOptions } from "./tools/searchFilesTool.js";
 import { typeCheckTool } from "./tools/typeCheckTool.js";
 import { writeTool } from "./tools/writeTool.js";
 import { getTracer } from "./telemetry.js";
+import {
+  formatUntrustedFileContent,
+  isSensitiveFilePath,
+  requireToolApproval,
+  SECURITY_SYSTEM_MESSAGE,
+  type SecurityOptions,
+  validateBashCommand,
+} from "./securityPolicy.js";
 import {
   logAgentDebug,
   logToolError,
@@ -24,6 +34,7 @@ import {
   logToolSuccess,
   redactSecretValues,
 } from "./traceLogger.js";
+import { type WorkflowEvent } from "./workflow.js";
 
 const MAX_AGENT_STEPS = 50;
 
@@ -64,7 +75,12 @@ type AgentEventHandler = (event: AgentEvent) => void;
 type RunAgentOptions = {
   maxSteps?: number | null;
   mode?: AgentRunMode;
+  includeTools?: boolean;
   onEvent?: AgentEventHandler;
+  promptForRecord?: string;
+  conversationMessageCountBeforeRun?: number;
+  security?: SecurityOptions;
+  workflowEvents?: WorkflowEvent[];
 };
 
 function sanitizeEventText(value: string): string {
@@ -77,6 +93,21 @@ function emitAgentEvent(onEvent: AgentEventHandler | undefined, event: AgentEven
 
 function getMessageRoleSummary(messages: ChatMessage[]): string {
   return messages.map((message) => message.role).join(" -> ");
+}
+
+function ensureSecuritySystemMessage(messages: ChatMessage[]): void {
+  if (
+    messages.some(
+      (message) => message.role === "system" && message.content === SECURITY_SYSTEM_MESSAGE,
+    )
+  ) {
+    return;
+  }
+
+  messages.unshift({
+    role: "system",
+    content: SECURITY_SYSTEM_MESSAGE,
+  });
 }
 
 function parseReadToolArguments(rawArguments: string | undefined): string {
@@ -170,7 +201,10 @@ function parseBashToolArguments(rawArguments: string | undefined): string {
   return args.command;
 }
 
-function parseSearchFilesToolArguments(rawArguments: string | undefined): string {
+function parseSearchFilesToolArguments(rawArguments: string | undefined): {
+  query: string;
+  options: SearchFilesOptions;
+} {
   if (!rawArguments) {
     throw new Error("SearchFiles tool call is missing arguments.");
   }
@@ -183,7 +217,7 @@ function parseSearchFilesToolArguments(rawArguments: string | undefined): string
     throw new Error("SearchFiles tool arguments must be valid JSON.");
   }
 
-  const args = parsed as { query?: unknown };
+  const args = parsed as { query?: unknown; search_text?: unknown; max_results?: unknown };
 
   if (
     typeof parsed !== "object" ||
@@ -194,7 +228,21 @@ function parseSearchFilesToolArguments(rawArguments: string | undefined): string
     throw new Error("SearchFiles tool requires query as a non-empty string.");
   }
 
-  return args.query;
+  if (args.search_text !== undefined && typeof args.search_text !== "boolean") {
+    throw new Error("SearchFiles search_text must be a boolean when provided.");
+  }
+
+  if (args.max_results !== undefined && typeof args.max_results !== "number") {
+    throw new Error("SearchFiles max_results must be a number when provided.");
+  }
+
+  return {
+    query: args.query,
+    options: {
+      searchText: args.search_text,
+      maxResults: args.max_results,
+    },
+  };
 }
 
 function parseDocumentSymbolsToolArguments(rawArguments: string | undefined): string {
@@ -224,6 +272,55 @@ function parseDocumentSymbolsToolArguments(rawArguments: string | undefined): st
   return args.file_path;
 }
 
+function parseLspLocationToolArguments(
+  toolName: "GoToDefinition" | "FindReferences",
+  rawArguments: string | undefined,
+): {
+  filePath: string;
+  line: number;
+  column: number;
+} {
+  if (!rawArguments) {
+    throw new Error(`${toolName} tool call is missing arguments.`);
+  }
+
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(rawArguments);
+  } catch {
+    throw new Error(`${toolName} tool arguments must be valid JSON.`);
+  }
+
+  const args = parsed as { file_path?: unknown; line?: unknown; column?: unknown };
+
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    typeof args.file_path !== "string" ||
+    args.file_path.trim() === ""
+  ) {
+    throw new Error(`${toolName} requires file_path as a non-empty string.`);
+  }
+
+  if (
+    typeof args.line !== "number" ||
+    !Number.isInteger(args.line) ||
+    args.line < 1 ||
+    typeof args.column !== "number" ||
+    !Number.isInteger(args.column) ||
+    args.column < 1
+  ) {
+    throw new Error(`${toolName} requires line and column as positive integers.`);
+  }
+
+  return {
+    filePath: args.file_path,
+    line: args.line,
+    column: args.column,
+  };
+}
+
 function summarizeToolResult(toolName: string, result: string): string {
   if (toolName === "Read") {
     return `Read completed. ${result.length} characters returned.`;
@@ -243,7 +340,11 @@ function summarizeToolResult(toolName: string, result: string): string {
 }
 
 function getToolSpanName(toolName: string | undefined): string {
-  if (toolName === "DocumentSymbols") {
+  if (
+    toolName === "DocumentSymbols" ||
+    toolName === "GoToDefinition" ||
+    toolName === "FindReferences"
+  ) {
     return "tool.LSP";
   }
 
@@ -306,10 +407,27 @@ async function saveRecorderSafely(recorder: BlackBoxRecorder): Promise<void> {
   }
 }
 
+function recordWorkflowEvents(recorder: BlackBoxRecorder, events: WorkflowEvent[]): void {
+  for (const event of events) {
+    if (event.type === "phase_started") {
+      recorder.recordPhaseStarted(event.name);
+      continue;
+    }
+
+    if (event.type === "phase_completed") {
+      recorder.recordPhaseCompleted(event.name, event.summary);
+      continue;
+    }
+
+    recorder.recordVerificationResult(event.name, event.passed, event.summary);
+  }
+}
+
 async function executeToolCall(
   toolCall: ToolCall,
   recorder: BlackBoxRecorder,
   onEvent?: AgentEventHandler,
+  security?: SecurityOptions,
 ): Promise<string> {
   if (!toolCall.id) {
     throw new Error("Tool call is missing an id.");
@@ -323,6 +441,13 @@ async function executeToolCall(
   try {
     if (toolName === "Read") {
     const filePath = parseReadToolArguments(toolCall.function?.arguments);
+    if (isSensitiveFilePath(filePath)) {
+      await requireToolApproval(security, {
+        toolName: "Read",
+        reason: "Read requested a sensitive file path.",
+        details: { file_path: sanitizeEventText(filePath) },
+      });
+    }
     setToolFilePath(span, filePath);
     logToolStart("Read", { file_path: filePath });
     emitAgentEvent(onEvent, {
@@ -334,7 +459,8 @@ async function executeToolCall(
     recorder.recordFileRead(filePath);
 
     try {
-      const result = await readTool(filePath);
+      const rawResult = await readTool(filePath);
+      const result = formatUntrustedFileContent(filePath, rawResult);
       const durationMs = Date.now() - startedAt;
       logToolSuccess("Read", durationMs);
       finishToolSpan(span, durationMs, result);
@@ -344,7 +470,7 @@ async function executeToolCall(
         toolName: "Read",
         durationMs,
       });
-      recorder.recordToolResult("Read", summarizeToolResult("Read", result));
+      recorder.recordToolResult("Read", summarizeToolResult("Read", rawResult));
       return result;
     } catch (error) {
       const durationMs = Date.now() - startedAt;
@@ -362,6 +488,14 @@ async function executeToolCall(
 
   if (toolName === "Write") {
     const args = parseWriteToolArguments(toolCall.function?.arguments);
+    await requireToolApproval(security, {
+      toolName: "Write",
+      reason: "Write can create or overwrite project files.",
+      details: {
+        file_path: sanitizeEventText(args.filePath),
+        content_length: args.content.length,
+      },
+    });
     setToolFilePath(span, args.filePath);
     span.setAttribute("tool.content_length", args.content.length);
     logToolStart("Write", {
@@ -411,6 +545,12 @@ async function executeToolCall(
 
   if (toolName === "Bash") {
     const command = parseBashToolArguments(toolCall.function?.arguments);
+    validateBashCommand(command);
+    await requireToolApproval(security, {
+      toolName: "Bash",
+      reason: "Bash executes a local command.",
+      details: { command: sanitizeEventText(command) },
+    });
     span.setAttribute("tool.command_redacted", redactSecretValues(command));
     logToolStart("Bash", { command: redactSecretValues(command) });
     emitAgentEvent(onEvent, {
@@ -449,18 +589,24 @@ async function executeToolCall(
   }
 
   if (toolName === "SearchFiles") {
-    const query = parseSearchFilesToolArguments(toolCall.function?.arguments);
+    const { query, options } = parseSearchFilesToolArguments(toolCall.function?.arguments);
     span.setAttribute("tool.query", redactSecretValues(query));
+    span.setAttribute("tool.search_text", options.searchText ?? false);
+    span.setAttribute("tool.max_results", options.maxResults ?? 25);
     logToolStart("SearchFiles", { query });
     emitAgentEvent(onEvent, {
       type: "tool_started",
       toolName: "SearchFiles",
       args: { query: sanitizeEventText(query) },
     });
-    recorder.recordToolCall("SearchFiles", { query });
+    recorder.recordToolCall("SearchFiles", {
+      query,
+      search_text: options.searchText ? 1 : 0,
+      max_results: options.maxResults ?? 25,
+    });
 
     try {
-      const result = await searchFilesTool(query);
+      const result = await searchFilesTool(query, options);
       const durationMs = Date.now() - startedAt;
       logToolSuccess("SearchFiles", durationMs);
       finishToolSpan(span, durationMs, result);
@@ -567,6 +713,108 @@ async function executeToolCall(
     }
   }
 
+  if (toolName === "GoToDefinition") {
+    const args = parseLspLocationToolArguments("GoToDefinition", toolCall.function?.arguments);
+    setToolFilePath(span, args.filePath);
+    logToolStart("GoToDefinition", {
+      file_path: args.filePath,
+      line: args.line,
+      column: args.column,
+    });
+    emitAgentEvent(onEvent, {
+      type: "tool_started",
+      toolName: "GoToDefinition",
+      args: {
+        file_path: sanitizeEventText(args.filePath),
+        line: args.line,
+        column: args.column,
+      },
+    });
+    recorder.recordToolCall("GoToDefinition", {
+      file_path: args.filePath,
+      line: args.line,
+      column: args.column,
+    });
+    recorder.recordFileRead(args.filePath);
+
+    try {
+      const result = await goToDefinitionTool(args.filePath, args.line, args.column);
+      const durationMs = Date.now() - startedAt;
+      logToolSuccess("GoToDefinition", durationMs);
+      finishToolSpan(span, durationMs, result);
+      spanEnded = true;
+      emitAgentEvent(onEvent, {
+        type: "tool_completed",
+        toolName: "GoToDefinition",
+        durationMs,
+      });
+      recorder.recordToolResult("GoToDefinition", summarizeToolResult("GoToDefinition", result));
+      return result;
+    } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      const message = error instanceof Error ? error.message : "Unknown error";
+      logToolError("GoToDefinition", durationMs, message);
+      emitAgentEvent(onEvent, {
+        type: "tool_error",
+        toolName: "GoToDefinition",
+        durationMs,
+        error: sanitizeEventText(message),
+      });
+      throw error;
+    }
+  }
+
+  if (toolName === "FindReferences") {
+    const args = parseLspLocationToolArguments("FindReferences", toolCall.function?.arguments);
+    setToolFilePath(span, args.filePath);
+    logToolStart("FindReferences", {
+      file_path: args.filePath,
+      line: args.line,
+      column: args.column,
+    });
+    emitAgentEvent(onEvent, {
+      type: "tool_started",
+      toolName: "FindReferences",
+      args: {
+        file_path: sanitizeEventText(args.filePath),
+        line: args.line,
+        column: args.column,
+      },
+    });
+    recorder.recordToolCall("FindReferences", {
+      file_path: args.filePath,
+      line: args.line,
+      column: args.column,
+    });
+    recorder.recordFileRead(args.filePath);
+
+    try {
+      const result = await findReferencesTool(args.filePath, args.line, args.column);
+      const durationMs = Date.now() - startedAt;
+      logToolSuccess("FindReferences", durationMs);
+      finishToolSpan(span, durationMs, result);
+      spanEnded = true;
+      emitAgentEvent(onEvent, {
+        type: "tool_completed",
+        toolName: "FindReferences",
+        durationMs,
+      });
+      recorder.recordToolResult("FindReferences", summarizeToolResult("FindReferences", result));
+      return result;
+    } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      const message = error instanceof Error ? error.message : "Unknown error";
+      logToolError("FindReferences", durationMs, message);
+      emitAgentEvent(onEvent, {
+        type: "tool_error",
+        toolName: "FindReferences",
+        durationMs,
+        error: sanitizeEventText(message),
+      });
+      throw error;
+    }
+  }
+
     throw new Error(`Unsupported tool requested: ${toolName ?? "unknown"}`);
   } catch (error) {
     if (!spanEnded) {
@@ -578,37 +826,67 @@ async function executeToolCall(
 }
 
 export async function runAgent(prompt: string, options: RunAgentOptions = {}): Promise<string> {
+  const messages: ChatMessage[] = [
+    {
+      role: "user",
+      content: prompt,
+    },
+  ];
+
+  return runAgentWithMessages(messages, {
+    ...options,
+    promptForRecord: options.promptForRecord ?? prompt,
+  });
+}
+
+function getLastUserPrompt(messages: ChatMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+
+    if (message.role === "user") {
+      return message.content;
+    }
+  }
+
+  return "";
+}
+
+export async function runAgentWithMessages(
+  messages: ChatMessage[],
+  options: RunAgentOptions = {},
+): Promise<string> {
+  const promptForRecord = options.promptForRecord ?? getLastUserPrompt(messages);
+  ensureSecuritySystemMessage(messages);
   const maxSteps = options.maxSteps ?? MAX_AGENT_STEPS;
   const agentSpan = getTracer().startSpan("agent.run");
   const activeContext = trace.setSpan(otelContext.active(), agentSpan);
 
   agentSpan.setAttribute("agent.mode", options.mode ?? "normal");
-  agentSpan.setAttribute("agent.prompt_length", prompt.length);
+  agentSpan.setAttribute("agent.prompt_length", promptForRecord.length);
   agentSpan.setAttribute("agent.max_steps", maxSteps === null ? "unlimited" : maxSteps);
+  agentSpan.setAttribute("agent.message_count_start", messages.length);
 
   return otelContext.with(activeContext, async () => {
     const recorder = createBlackBoxRecorder({
-      prompt,
+      prompt: promptForRecord,
       mode: options.mode,
       traceId: getValidTraceId(agentSpan),
+      conversationMessageCountBeforeRun: options.conversationMessageCountBeforeRun,
     });
-    const messages: ChatMessage[] = [
-      {
-        role: "user",
-        content: prompt,
-      },
-    ];
+    recordWorkflowEvents(recorder, options.workflowEvents ?? []);
 
     try {
       emitAgentEvent(options.onEvent, {
         type: "agent_started",
-        prompt: sanitizeEventText(prompt),
+        prompt: sanitizeEventText(promptForRecord),
       });
 
       for (let step = 0; maxSteps === null || step < maxSteps; step += 1) {
         agentSpan.setAttribute("agent.current_step", step + 1);
 
-        const assistantMessage = await sendMessagesToLlm(messages);
+        const assistantMessage = await sendMessagesToLlm(messages, {
+          includeTools: options.includeTools ?? true,
+        });
         messages.push(assistantMessage);
 
         const toolCalls = assistantMessage.tool_calls ?? [];
@@ -630,7 +908,9 @@ export async function runAgent(prompt: string, options: RunAgentOptions = {}): P
           }
 
           recorder.recordFinalAnswer(finalContent);
+          recorder.setConversationMessageCountAfterRun(messages.length);
           agentSpan.setAttribute("agent.final_answer_length", finalContent.length);
+          agentSpan.setAttribute("agent.message_count_end", messages.length);
           agentSpan.setStatus({ code: SpanStatusCode.OK });
           emitAgentEvent(options.onEvent, {
             type: "agent_completed",
@@ -645,7 +925,12 @@ export async function runAgent(prompt: string, options: RunAgentOptions = {}): P
             throw new Error("Tool call is missing an id.");
           }
 
-          const toolResult = await executeToolCall(toolCall, recorder, options.onEvent);
+          const toolResult = await executeToolCall(
+            toolCall,
+            recorder,
+            options.onEvent,
+            options.security,
+          );
 
           messages.push({
             role: "tool",
@@ -659,6 +944,7 @@ export async function runAgent(prompt: string, options: RunAgentOptions = {}): P
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       recorder.recordError(message);
+      recorder.setConversationMessageCountAfterRun(messages.length);
       agentSpan.recordException(error instanceof Error ? error : new Error(message));
       agentSpan.setStatus({
         code: SpanStatusCode.ERROR,

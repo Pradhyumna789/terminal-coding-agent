@@ -1,11 +1,24 @@
-import { writeFile } from "node:fs/promises";
-import { PathSafetyError, resolveProjectPath } from "./pathSafety.js";
+import { mkdir, stat, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import { PathSafetyError, resolveWritableProjectPath } from "./pathSafety.js";
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await stat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export async function writeTool(filePath: string, content: string): Promise<string> {
   try {
-    const safePath = resolveProjectPath(filePath);
+    const safePath = await resolveWritableProjectPath(filePath);
+    const existed = await pathExists(safePath);
+
+    await mkdir(dirname(safePath), { recursive: true });
     await writeFile(safePath, content, "utf-8");
-    return `Wrote file: ${filePath}`;
+    return `${existed ? "Overwrote" : "Created"} file: ${filePath}`;
   } catch (error) {
     if (error instanceof PathSafetyError) {
       throw error;

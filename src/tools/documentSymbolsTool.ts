@@ -3,7 +3,7 @@ import { getTypeScriptDocumentSymbols } from "../lsp/lspClient.js";
 import { resolveProjectPath } from "./pathSafety.js";
 
 export async function documentSymbolsTool(filePath: string): Promise<string> {
-  const absoluteFilePath = resolveProjectPath(filePath);
+  const absoluteFilePath = await resolveProjectPath(filePath);
   const relativeFilePath = relative(process.cwd(), absoluteFilePath);
   const symbols = await getTypeScriptDocumentSymbols(absoluteFilePath);
 

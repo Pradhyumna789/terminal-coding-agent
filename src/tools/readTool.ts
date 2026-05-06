@@ -3,7 +3,7 @@ import { PathSafetyError, resolveProjectPath } from "./pathSafety.js";
 
 export async function readTool(filePath: string): Promise<string> {
   try {
-    const safePath = resolveProjectPath(filePath);
+    const safePath = await resolveProjectPath(filePath);
     return await readFile(safePath, "utf-8");
   } catch (error) {
     if (error instanceof PathSafetyError) {

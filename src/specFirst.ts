@@ -1,6 +1,8 @@
-import { type ChatMessage, sendMessagesToLlm } from "./llmClient.js";
+import { runAgent } from "./agent.js";
+import { type SecurityOptions } from "./securityPolicy.js";
+import { createWorkflowRecorder } from "./workflow.js";
 
-function buildSpecPrompt(task: string): string {
+export function buildSpecPrompt(task: string): string {
   return `Create a short implementation specification for this task.
 
 Task:
@@ -19,22 +21,21 @@ Use this exact format:
 6. Confirmation question`;
 }
 
-export async function runSpecFirst(task: string): Promise<string> {
-  const messages: ChatMessage[] = [
-    {
-      role: "user",
-      content: buildSpecPrompt(task),
-    },
-  ];
+export async function runSpecFirst(
+  task: string,
+  security?: SecurityOptions,
+): Promise<string> {
+  const workflow = createWorkflowRecorder();
 
-  const assistantMessage = await sendMessagesToLlm(messages, { includeTools: false });
-  const content = assistantMessage.content?.trim();
+  workflow.recordPhaseStarted("spec-generation");
+  workflow.recordPhaseCompleted("spec-generation", "Specification generation requested without tools.");
+  const spec = await runAgent(buildSpecPrompt(task), {
+    mode: "spec-first",
+    includeTools: false,
+    security,
+    promptForRecord: task,
+    workflowEvents: workflow.events,
+  });
 
-  if (!content) {
-    throw new Error(
-      "The model returned an empty spec-first response. Try a shorter task or a different model.",
-    );
-  }
-
-  return content;
+  return spec;
 }

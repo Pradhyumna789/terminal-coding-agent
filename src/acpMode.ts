@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import { stdin, stdout } from "node:process";
 import { handleAcpRealMessage } from "./acpRealMode.js";
 import { type AgentEvent, runAgent } from "./agent.js";
+import { type SecurityOptions } from "./securityPolicy.js";
 import { redactSecretValues } from "./traceLogger.js";
 
 type AcpRunRequest = {
@@ -47,7 +48,16 @@ type AcpEvent =
     };
 
 const ACP_CAPABILITIES: AcpCapabilities = {
-  tools: ["Read", "Write", "Bash", "SearchFiles", "TypeCheck", "DocumentSymbols"],
+  tools: [
+    "Read",
+    "Write",
+    "Bash",
+    "SearchFiles",
+    "TypeCheck",
+    "DocumentSymbols",
+    "GoToDefinition",
+    "FindReferences",
+  ],
   modes: ["one-shot", "interactive", "spec-first", "tdd", "docs", "acp"],
   supportsStreamingEvents: true,
 };
@@ -124,7 +134,10 @@ function parseRunRequest(value: unknown, id: string): AcpRunRequest {
   };
 }
 
-async function handleRunRequest(request: AcpRunRequest): Promise<void> {
+async function handleRunRequest(
+  request: AcpRunRequest,
+  security: SecurityOptions,
+): Promise<void> {
   writeEvent({
     type: "started",
     id: request.id,
@@ -132,6 +145,7 @@ async function handleRunRequest(request: AcpRunRequest): Promise<void> {
 
   try {
     const finalAnswer = await runAgent(request.prompt, {
+      security,
       onEvent(event) {
         writeEvent({
           type: "agent_event",
@@ -155,7 +169,7 @@ async function handleRunRequest(request: AcpRunRequest): Promise<void> {
   }
 }
 
-async function handleMessage(parsed: unknown): Promise<void> {
+async function handleMessage(parsed: unknown, security: SecurityOptions): Promise<void> {
   let id: string;
   let messageType: string;
 
@@ -191,7 +205,7 @@ async function handleMessage(parsed: unknown): Promise<void> {
 
   if (messageType === "run") {
     try {
-      await handleRunRequest(parseRunRequest(parsed, id));
+      await handleRunRequest(parseRunRequest(parsed, id), security);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Invalid ACP request.";
       writeEvent({
@@ -210,7 +224,7 @@ async function handleMessage(parsed: unknown): Promise<void> {
   });
 }
 
-async function handleLine(line: string): Promise<void> {
+async function handleLine(line: string, security: SecurityOptions): Promise<void> {
   const trimmedLine = line.trim();
 
   if (!trimmedLine) {
@@ -230,14 +244,14 @@ async function handleLine(line: string): Promise<void> {
   }
 
   if (isJsonRpcMessage(parsed)) {
-    await handleAcpRealMessage(parsed);
+    await handleAcpRealMessage(parsed, security);
     return;
   }
 
-  await handleMessage(parsed);
+  await handleMessage(parsed, security);
 }
 
-export async function runAcpMode(): Promise<void> {
+export async function runAcpMode(security: SecurityOptions = {}): Promise<void> {
   const rl = createInterface({
     input: stdin,
     crlfDelay: Infinity,
@@ -245,7 +259,7 @@ export async function runAcpMode(): Promise<void> {
 
   try {
     for await (const line of rl) {
-      await handleLine(line);
+      await handleLine(line, security);
     }
   } finally {
     rl.close();

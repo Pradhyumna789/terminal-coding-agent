@@ -14,6 +14,10 @@ export type ToolCall = {
 
 export type ChatMessage =
   | {
+      role: "system";
+      content: string;
+    }
+  | {
       role: "user";
       content: string;
     }

@@ -3,11 +3,29 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { redactSecretValues } from "./traceLogger.js";
 
-export type AgentRunMode = "normal" | "tdd" | "docs";
+export type AgentRunMode = "normal" | "interactive" | "spec-first" | "tdd" | "docs";
 
 type RecorderArguments = Record<string, string | number>;
 
 type AgentRunEvent =
+  | {
+      type: "phase_started";
+      timestamp: string;
+      name: string;
+    }
+  | {
+      type: "phase_completed";
+      timestamp: string;
+      name: string;
+      summary: string;
+    }
+  | {
+      type: "verification_result";
+      timestamp: string;
+      name: string;
+      passed: boolean;
+      summary: string;
+    }
   | {
       type: "tool_call";
       timestamp: string;
@@ -37,6 +55,8 @@ type AgentRunRecord = {
   mode: AgentRunMode;
   traceId: string | null;
   prompt: string;
+  conversationMessageCountBeforeRun?: number;
+  conversationMessageCountAfterRun?: number;
   events: AgentRunEvent[];
   filesRead: string[];
   filesWritten: string[];
@@ -53,8 +73,12 @@ export type BlackBoxRecorder = {
   recordFileWritten(filePath: string): void;
   recordBashCommand(command: string): void;
   recordTypeCheckResult(summary: string): void;
+  recordPhaseStarted(name: string): void;
+  recordPhaseCompleted(name: string, summary: string): void;
+  recordVerificationResult(name: string, passed: boolean, summary: string): void;
   recordFinalAnswer(answer: string): void;
   recordError(errorMessage: string): void;
+  setConversationMessageCountAfterRun(count: number): void;
   save(): Promise<void>;
 };
 
@@ -92,6 +116,7 @@ export function createBlackBoxRecorder(input: {
   prompt: string;
   mode?: AgentRunMode;
   traceId?: string | null;
+  conversationMessageCountBeforeRun?: number;
 }): BlackBoxRecorder {
   const record: AgentRunRecord = {
     id: randomUUID(),
@@ -99,6 +124,7 @@ export function createBlackBoxRecorder(input: {
     mode: input.mode ?? "normal",
     traceId: input.traceId ?? null,
     prompt: truncate(sanitizeText(input.prompt)),
+    conversationMessageCountBeforeRun: input.conversationMessageCountBeforeRun,
     events: [],
     filesRead: [],
     filesWritten: [],
@@ -107,6 +133,30 @@ export function createBlackBoxRecorder(input: {
   };
 
   return {
+    recordPhaseStarted(name) {
+      record.events.push({
+        type: "phase_started",
+        timestamp: now(),
+        name: truncate(sanitizeText(name)),
+      });
+    },
+    recordPhaseCompleted(name, summary) {
+      record.events.push({
+        type: "phase_completed",
+        timestamp: now(),
+        name: truncate(sanitizeText(name)),
+        summary: truncate(sanitizeText(summary)),
+      });
+    },
+    recordVerificationResult(name, passed, summary) {
+      record.events.push({
+        type: "verification_result",
+        timestamp: now(),
+        name: truncate(sanitizeText(name)),
+        passed,
+        summary: truncate(sanitizeText(summary)),
+      });
+    },
     recordToolCall(toolName, args) {
       record.events.push({
         type: "tool_call",
@@ -124,10 +174,10 @@ export function createBlackBoxRecorder(input: {
       });
     },
     recordFileRead(filePath) {
-      record.filesRead.push(filePath);
+      record.filesRead.push(truncate(sanitizeText(filePath)));
     },
     recordFileWritten(filePath) {
-      record.filesWritten.push(filePath);
+      record.filesWritten.push(truncate(sanitizeText(filePath)));
     },
     recordBashCommand(command) {
       record.bashCommands.push(truncate(sanitizeText(command)));
@@ -152,6 +202,9 @@ export function createBlackBoxRecorder(input: {
         timestamp: now(),
         message,
       });
+    },
+    setConversationMessageCountAfterRun(count) {
+      record.conversationMessageCountAfterRun = count;
     },
     async save() {
       const runsDirectory = join(process.cwd(), "runs");

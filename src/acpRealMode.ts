@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { stdin, stdout } from "node:process";
 import { type AgentEvent, runAgent } from "./agent.js";
+import { type SecurityOptions } from "./securityPolicy.js";
 import { redactSecretValues } from "./traceLogger.js";
 
 const PROTOCOL_VERSION = 1;
@@ -211,7 +212,12 @@ function parsePromptParams(params: unknown): PromptParams {
 }
 
 function getToolKind(toolName: string): string {
-  if (toolName === "Read" || toolName === "DocumentSymbols") {
+  if (
+    toolName === "Read" ||
+    toolName === "DocumentSymbols" ||
+    toolName === "GoToDefinition" ||
+    toolName === "FindReferences"
+  ) {
     return "read";
   }
 
@@ -237,7 +243,10 @@ function createTextBlock(text: string): TextContentBlock {
   };
 }
 
-async function handleSessionPrompt(request: JsonRpcRequest): Promise<void> {
+async function handleSessionPrompt(
+  request: JsonRpcRequest,
+  security: SecurityOptions,
+): Promise<void> {
   const params = parsePromptParams(request.params);
   const session = sessions.get(params.sessionId);
 
@@ -315,7 +324,7 @@ async function handleSessionPrompt(request: JsonRpcRequest): Promise<void> {
   }
 
   try {
-    await runAgent(promptText, { onEvent });
+    await runAgent(promptText, { onEvent, security });
 
     writeResult(getRequestId(request) ?? null, {
       stopReason: session.cancelled ? "cancelled" : "end_turn",
@@ -348,7 +357,7 @@ function handleSessionCancel(request: JsonRpcRequest): void {
   }
 }
 
-async function handleRequest(request: JsonRpcRequest): Promise<void> {
+async function handleRequest(request: JsonRpcRequest, security: SecurityOptions): Promise<void> {
   try {
     if (request.method === "initialize") {
       handleInitialize(request);
@@ -361,7 +370,7 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
     }
 
     if (request.method === "session/prompt") {
-      await handleSessionPrompt(request);
+      await handleSessionPrompt(request, security);
       return;
     }
 
@@ -381,7 +390,10 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
   }
 }
 
-export async function handleAcpRealMessage(parsed: unknown): Promise<void> {
+export async function handleAcpRealMessage(
+  parsed: unknown,
+  security: SecurityOptions = {},
+): Promise<void> {
   let request: JsonRpcRequest;
 
   try {
@@ -392,10 +404,10 @@ export async function handleAcpRealMessage(parsed: unknown): Promise<void> {
     return;
   }
 
-  await handleRequest(request);
+  await handleRequest(request, security);
 }
 
-async function handleLine(line: string): Promise<void> {
+async function handleLine(line: string, security: SecurityOptions): Promise<void> {
   const trimmedLine = line.trim();
 
   if (!trimmedLine) {
@@ -411,10 +423,10 @@ async function handleLine(line: string): Promise<void> {
     return;
   }
 
-  await handleAcpRealMessage(parsed);
+  await handleAcpRealMessage(parsed, security);
 }
 
-export async function runAcpRealMode(): Promise<void> {
+export async function runAcpRealMode(security: SecurityOptions = {}): Promise<void> {
   const rl = createInterface({
     input: stdin,
     crlfDelay: Infinity,
@@ -422,7 +434,7 @@ export async function runAcpRealMode(): Promise<void> {
 
   try {
     for await (const line of rl) {
-      await handleLine(line);
+      await handleLine(line, security);
     }
   } finally {
     rl.close();

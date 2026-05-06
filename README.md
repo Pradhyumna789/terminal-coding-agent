@@ -18,9 +18,9 @@ The project currently includes:
 - A simple agent loop that can execute Read, Write, Bash, SearchFiles, and TypeCheck tool calls
 - Tool trace logging for capstone-friendly observability
 
-The Bash tool includes a timeout and basic safety checks for obviously dangerous
-commands. Tool traces are written to stderr so stdout stays reserved for the
-final assistant answer.
+The Bash tool uses an allowlist, timeout, output limit, and approval policy.
+Tool traces are written to stderr so stdout stays reserved for the final
+assistant answer.
 
 ## Project Structure
 
@@ -89,6 +89,89 @@ Short flag:
 npm run dev -- -p "Explain TypeScript in one sentence"
 ```
 
+Interactive mode starts when no `--prompt` is provided:
+
+```bash
+npm run dev
+```
+
+In interactive mode, the terminal keeps an in-memory conversation history for
+the current session. That means follow-up prompts can refer to earlier turns.
+One-shot `--prompt` runs are still isolated.
+
+Useful local interactive commands:
+
+```text
+agent> /history
+agent> /reset
+agent> clear
+agent> exit
+```
+
+`/history` prints the current stored message count, `/reset` clears conversation
+memory, `clear` or `cls` clears the screen, and `exit` or `quit` closes the CLI.
+
+## Security Model
+
+The agent uses safe defaults around local tools:
+
+- Read, Write, and DocumentSymbols resolve paths against the real project root
+  and block symlink escapes.
+- Read blocks sensitive files such as `.env`, private keys, and credential files
+  unless explicitly approved.
+- Read tool results are marked as untrusted project file content before being
+  sent back to the model.
+- Write requires approval before creating or overwriting files.
+- Bash requires approval and must match the safe command allowlist.
+- Trace logs, recorder files, ACP events, and telemetry attributes redact common
+  API keys, bearer tokens, GitHub tokens, JWT-like tokens, and secret env values.
+
+Useful security flags:
+
+```powershell
+npm run dev -- --yes --prompt "Use Write to create demo.txt"
+npm run dev -- --yes --allow-bash --prompt "Run TypeCheck"
+npm run dev -- --deny-tools --prompt "Inspect the project without changing files"
+npm run dev -- --yes --allow-sensitive-read --prompt "Read .env.example"
+```
+
+`--yes` auto-approves Write. Bash also needs `--allow-bash` in non-interactive
+mode. Sensitive reads need both `--yes` and `--allow-sensitive-read`.
+
+The Bash allowlist is intentionally small. It supports project verification and
+simple inspection commands such as:
+
+```text
+npm run typecheck
+npm run build
+npm test
+dir
+Get-ChildItem
+Select-String ...
+type ...
+echo ...
+node --version
+```
+
+Commands with destructive operations, shell chaining, pipes, redirects, network
+download tools, process-kill commands, interactive editors, or sensitive file
+targets are blocked.
+
+Optional Docker sandbox mode for Bash:
+
+```powershell
+$env:AGENT_BASH_SANDBOX="docker"
+```
+
+When enabled, allowed Bash commands run in a temporary `node:20-alpine`
+container with the project mounted at `/workspace`. Docker is optional; local
+allowlisted execution remains the default for evaluator machines without Docker.
+
+Known limitations: the sandbox is still a capstone-friendly safety layer, not a
+complete production isolation system. Approval, allowlists, realpath checks, and
+redaction reduce risk, but they do not replace a hardened production container
+or full permission broker.
+
 Spec-first mode creates a short implementation spec without advertising tools or
 modifying files:
 
@@ -113,6 +196,9 @@ Expected sections:
 6. Confirmation question
 ```
 
+Spec-first now runs through the normal agent/recorder path with tools disabled,
+so each spec run is saved under `runs/` with mode `spec-first`.
+
 TDD mode asks the agent to inspect files, create or update tests first, run
 verification, implement the smallest change, and verify again:
 
@@ -126,15 +212,21 @@ Interactive TDD command:
 agent> /tdd Add tests for path sandbox behavior
 ```
 
-If no test framework exists, the agent should explain that and use TypeCheck as
-a fallback only when it fits the task.
+TDD mode first inspects the project test setup, keeps the agent loop unlimited
+for this mode, and then runs the done-criteria harness before reporting status.
 
-TDD mode also runs a done-criteria harness before reporting completion:
+The project includes a real test script:
+
+```powershell
+npm test
+```
+
+Done criteria example:
 
 ```text
 Done criteria: PASSED
 - TypeCheck: PASSED - npm run typecheck passed.
-- Tests: SKIPPED - No real npm test script found in package.json.
+- Tests: PASSED - npm test passed.
 - Final summary: PASSED - Final summary was generated.
 ```
 
@@ -147,9 +239,9 @@ DocuBuddy documentation mode is available in interactive mode:
 agent> /docs architecture of the agent loop and tools
 ```
 
-It uses SearchFiles and Read to inspect relevant files, then writes Markdown
-documentation to `docs/generated-architecture.md` by default. It can include
-Mermaid diagrams:
+It uses SearchFiles and Read to inspect relevant files, asks the model for
+Markdown content, then the local docs workflow writes and verifies
+`docs/generated-architecture.md`. The generated file includes Mermaid diagrams:
 
 ````text
 ```mermaid
@@ -161,18 +253,20 @@ flowchart TD
 The terminal output stays short and confirms which files were inspected and
 where the generated documentation was saved.
 
-Phase 9 adds a minimal real LSP integration through the `DocumentSymbols` tool.
-It starts `typescript-language-server`, opens the requested file, and asks the
-server for `textDocument/documentSymbol` results.
+The LSP tools use a reusable TypeScript language-server session during the
+current CLI process. Available LSP-backed tools are `DocumentSymbols`,
+`GoToDefinition`, and `FindReferences`.
 
 Example:
 
 ```text
 agent> Use DocumentSymbols on src/agent.ts and summarize the main functions.
+agent> Use GoToDefinition on src/agent.ts at line 1 column 10.
+agent> Use FindReferences on src/agent.ts at line 1 column 10.
 ```
 
-This is intentionally the first small LSP-backed capability. TypeCheck and the
-existing LSP-lite diagnostics remain unchanged.
+`DocumentSymbols` returns a symbol outline, while definition/reference tools
+return concise relative paths with line and column locations.
 
 ACP-like JSON protocol mode is available with `--acp`. In this mode the app
 reads newline-delimited JSON requests from stdin and writes JSON events to
@@ -234,7 +328,7 @@ returns:
 returns:
 
 ```json
-{"type":"capabilities_result","id":"c1","capabilities":{"tools":["Read","Write","Bash","SearchFiles","TypeCheck","DocumentSymbols"],"modes":["one-shot","interactive","spec-first","tdd","docs","acp"],"supportsStreamingEvents":true}}
+{"type":"capabilities_result","id":"c1","capabilities":{"tools":["Read","Write","Bash","SearchFiles","TypeCheck","DocumentSymbols","GoToDefinition","FindReferences"],"modes":["one-shot","interactive","spec-first","tdd","docs","acp"],"supportsStreamingEvents":true}}
 ```
 
 Real ACP compatibility mode is available separately:
@@ -369,9 +463,9 @@ Check that the LLM can see the advertised tools:
 npm run dev -- --prompt "What tools are available to you?"
 ```
 
-The program advertises Read, Write, Bash, SearchFiles, and TypeCheck, executes
-requested tool calls, appends tool results to the conversation, and continues
-until the model returns a final answer.
+The program advertises Read, Write, Bash, SearchFiles, TypeCheck, and the LSP
+tools, executes requested tool calls, appends tool results to the conversation,
+and continues until the model returns a final answer.
 
 ## Project Sandbox
 
@@ -410,10 +504,25 @@ Expected behavior:
 SearchFiles finds src/traceLogger.ts, then Read uses that path.
 ```
 
+Search inside text file contents:
+
+```powershell
+npm run dev -- --prompt "Use SearchFiles with search_text true to find redactSecretValues and show at most 5 results."
+```
+
+`SearchFiles` returns ranked matches with `[file]` or `[text]` labels. Text
+matches include `path:line` and a short snippet.
+
 Create or overwrite a file with Write:
 
 ```powershell
-npm run dev -- --prompt "Create a file named notes.txt containing: Hello from Write tool"
+npm run dev -- --yes --prompt "Create a file named notes.txt containing: Hello from Write tool"
+```
+
+Write can also create missing parent directories inside the project root:
+
+```powershell
+npm run dev -- --yes --prompt "Use Write to create tmp/nested/example.txt containing hello"
 ```
 
 Check the file:
@@ -463,7 +572,10 @@ structured diagnostics section:
 
 ```text
 Structured diagnostics:
-- src/agent.ts:42:12 - Type error: Type 'string | null' is not assignable to type 'string'.
+- src/agent.ts:42:12 - TS2322: Type 'string | null' is not assignable to type 'string'.
+  Context:
+  42 const value: string = maybeNull;
+                 ~~~~~
 ```
 
 Test safety checks:

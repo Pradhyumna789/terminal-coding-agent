@@ -70,6 +70,14 @@ export const tools = [
             type: "string",
             description: "File name or partial file path to search for.",
           },
+          search_text: {
+            type: "boolean",
+            description: "When true, search inside text file contents as well as file names.",
+          },
+          max_results: {
+            type: "number",
+            description: "Maximum number of matches to return. Defaults to 25 and caps at 100.",
+          },
         },
         required: ["query"],
         additionalProperties: false,
@@ -105,6 +113,60 @@ export const tools = [
           },
         },
         required: ["file_path"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "GoToDefinition",
+      description:
+        "uses the TypeScript language server to find the definition location for a symbol at a file position",
+      parameters: {
+        type: "object",
+        properties: {
+          file_path: {
+            type: "string",
+            description: "Path of the TypeScript or JavaScript file to inspect.",
+          },
+          line: {
+            type: "number",
+            description: "1-based line number of the symbol usage.",
+          },
+          column: {
+            type: "number",
+            description: "1-based column number of the symbol usage.",
+          },
+        },
+        required: ["file_path", "line", "column"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "FindReferences",
+      description:
+        "uses the TypeScript language server to find references for a symbol at a file position",
+      parameters: {
+        type: "object",
+        properties: {
+          file_path: {
+            type: "string",
+            description: "Path of the TypeScript or JavaScript file to inspect.",
+          },
+          line: {
+            type: "number",
+            description: "1-based line number of the symbol.",
+          },
+          column: {
+            type: "number",
+            description: "1-based column number of the symbol.",
+          },
+        },
+        required: ["file_path", "line", "column"],
         additionalProperties: false,
       },
     },

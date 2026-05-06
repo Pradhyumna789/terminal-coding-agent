@@ -1,8 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { basename, extname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { basename, extname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const LSP_REQUEST_TIMEOUT_MS = 20_000;
 
@@ -34,6 +34,16 @@ type Range = {
   end: Position;
 };
 
+type Location = {
+  uri: string;
+  range: Range;
+};
+
+type LocationLink = {
+  targetUri: string;
+  targetRange: Range;
+};
+
 type DocumentSymbol = {
   name: string;
   kind: number;
@@ -44,10 +54,7 @@ type DocumentSymbol = {
 type SymbolInformation = {
   name: string;
   kind: number;
-  location: {
-    uri: string;
-    range: Range;
-  };
+  location: Location;
 };
 
 export type LspDocumentSymbol = {
@@ -56,6 +63,12 @@ export type LspDocumentSymbol = {
   line: number;
   column: number;
   depth: number;
+};
+
+export type LspLocation = {
+  filePath: string;
+  line: number;
+  column: number;
 };
 
 class JsonRpcConnection {
@@ -182,9 +195,95 @@ class JsonRpcConnection {
   }
 }
 
-function getLanguageServerPath(): string {
+class LspSession {
+  private readonly connection: JsonRpcConnection;
+  private readonly openDocuments = new Set<string>();
+  private initialized = false;
+
+  constructor(
+    private readonly projectRoot: string,
+    private readonly serverProcess: ChildProcessWithoutNullStreams,
+  ) {
+    this.connection = new JsonRpcConnection(serverProcess);
+  }
+
+  async ensureInitialized(): Promise<void> {
+    if (this.initialized) {
+      return;
+    }
+
+    const rootUri = pathToFileURL(`${this.projectRoot}${sep}`).toString();
+
+    await this.connection.request("initialize", {
+      processId: process.pid,
+      rootUri,
+      capabilities: {
+        textDocument: {
+          definition: {},
+          documentSymbol: {
+            hierarchicalDocumentSymbolSupport: true,
+          },
+          references: {},
+        },
+      },
+      workspaceFolders: [
+        {
+          uri: rootUri,
+          name: basename(this.projectRoot),
+        },
+      ],
+    });
+
+    this.connection.notify("initialized", {});
+    this.initialized = true;
+  }
+
+  async ensureDocumentOpen(absoluteFilePath: string): Promise<string> {
+    await this.ensureInitialized();
+
+    const fileUri = pathToFileURL(absoluteFilePath).toString();
+
+    if (this.openDocuments.has(fileUri)) {
+      return fileUri;
+    }
+
+    const fileText = await readFile(absoluteFilePath, "utf8");
+
+    this.connection.notify("textDocument/didOpen", {
+      textDocument: {
+        uri: fileUri,
+        languageId: getLanguageId(absoluteFilePath),
+        version: 1,
+        text: fileText,
+      },
+    });
+    this.openDocuments.add(fileUri);
+
+    return fileUri;
+  }
+
+  async request(method: string, params: unknown): Promise<unknown> {
+    await this.ensureInitialized();
+    return this.connection.request(method, params);
+  }
+
+  async shutdown(): Promise<void> {
+    try {
+      await this.connection.request("shutdown", null);
+    } catch {
+      // Best effort cleanup only.
+    }
+
+    this.connection.notify("exit");
+    this.serverProcess.kill();
+  }
+}
+
+const sessions = new Map<string, LspSession>();
+
+function getLanguageServerPath(projectRoot: string): string {
   const serverPath = join(
-    process.cwd(),
+    projectRoot,
     "node_modules",
     "typescript-language-server",
     "lib",
@@ -193,12 +292,51 @@ function getLanguageServerPath(): string {
 
   if (!existsSync(serverPath)) {
     throw new Error(
-      "TypeScript language server is not installed. Run npm install before using DocumentSymbols.",
+      "TypeScript language server is not installed. Run npm install before using LSP tools.",
     );
   }
 
   return serverPath;
 }
+
+function createSession(projectRoot: string): LspSession {
+  const serverPath = getLanguageServerPath(projectRoot);
+  const serverProcess = spawn(process.execPath, [serverPath, "--stdio"], {
+    cwd: projectRoot,
+    stdio: "pipe",
+  });
+
+  return new LspSession(projectRoot, serverProcess);
+}
+
+function getSession(projectRoot: string): LspSession {
+  const existing = sessions.get(projectRoot);
+
+  if (existing) {
+    return existing;
+  }
+
+  const session = createSession(projectRoot);
+  sessions.set(projectRoot, session);
+
+  return session;
+}
+
+export async function shutdownTypeScriptLanguageServer(): Promise<void> {
+  const activeSessions = [...sessions.values()];
+  sessions.clear();
+  await Promise.all(activeSessions.map((session) => session.shutdown()));
+}
+
+process.once("exit", () => {
+  for (const session of sessions.values()) {
+    void session.shutdown();
+  }
+});
+
+process.once("SIGINT", () => {
+  void shutdownTypeScriptLanguageServer().finally(() => process.exit(130));
+});
 
 function getLanguageId(filePath: string): string {
   const extension = extname(filePath).toLowerCase();
@@ -267,15 +405,18 @@ function flattenDocumentSymbols(
   ]);
 }
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function isDocumentSymbol(value: unknown): value is DocumentSymbol {
   const symbol = value as Partial<DocumentSymbol>;
 
   return (
-    typeof value === "object" &&
-    value !== null &&
+    isObject(value) &&
     typeof symbol.name === "string" &&
     typeof symbol.kind === "number" &&
-    typeof symbol.range === "object"
+    isObject(symbol.range)
   );
 }
 
@@ -283,12 +424,23 @@ function isSymbolInformation(value: unknown): value is SymbolInformation {
   const symbol = value as Partial<SymbolInformation>;
 
   return (
-    typeof value === "object" &&
-    value !== null &&
+    isObject(value) &&
     typeof symbol.name === "string" &&
     typeof symbol.kind === "number" &&
-    typeof symbol.location === "object"
+    isObject(symbol.location)
   );
+}
+
+function isLocation(value: unknown): value is Location {
+  const location = value as Partial<Location>;
+
+  return isObject(value) && typeof location.uri === "string" && isObject(location.range);
+}
+
+function isLocationLink(value: unknown): value is LocationLink {
+  const location = value as Partial<LocationLink>;
+
+  return isObject(value) && typeof location.targetUri === "string" && isObject(location.targetRange);
 }
 
 function normalizeDocumentSymbols(result: unknown): LspDocumentSymbol[] {
@@ -313,71 +465,103 @@ function normalizeDocumentSymbols(result: unknown): LspDocumentSymbol[] {
   return [];
 }
 
-async function shutdownServer(
-  connection: JsonRpcConnection,
-  serverProcess: ChildProcessWithoutNullStreams,
-): Promise<void> {
-  try {
-    await connection.request("shutdown", null);
-  } catch {
-    // Best effort cleanup only.
+function locationToResult(projectRoot: string, uri: string, range: Range): LspLocation {
+  const absolutePath = fileURLToPath(uri);
+
+  return {
+    filePath: relative(projectRoot, absolutePath).split(sep).join("/"),
+    line: range.start.line + 1,
+    column: range.start.character + 1,
+  };
+}
+
+function normalizeLocations(projectRoot: string, result: unknown): LspLocation[] {
+  if (!result) {
+    return [];
   }
 
-  connection.notify("exit");
-  serverProcess.kill();
+  const values = Array.isArray(result) ? result : [result];
+
+  return values.flatMap((value) => {
+    if (isLocation(value)) {
+      return [locationToResult(projectRoot, value.uri, value.range)];
+    }
+
+    if (isLocationLink(value)) {
+      return [locationToResult(projectRoot, value.targetUri, value.targetRange)];
+    }
+
+    return [];
+  });
+}
+
+async function getPreparedSession(absoluteFilePath: string): Promise<{
+  projectRoot: string;
+  session: LspSession;
+  fileUri: string;
+}> {
+  const projectRoot = resolve(process.cwd());
+  const session = getSession(projectRoot);
+  const fileUri = await session.ensureDocumentOpen(absoluteFilePath);
+
+  return {
+    projectRoot,
+    session,
+    fileUri,
+  };
+}
+
+function toLspPosition(line: number, column: number): Position {
+  return {
+    line: line - 1,
+    character: column - 1,
+  };
 }
 
 export async function getTypeScriptDocumentSymbols(
   absoluteFilePath: string,
 ): Promise<LspDocumentSymbol[]> {
-  const projectRoot = resolve(process.cwd());
-  const serverPath = getLanguageServerPath();
-  const serverProcess = spawn(process.execPath, [serverPath, "--stdio"], {
-    cwd: projectRoot,
-    stdio: "pipe",
+  const { session, fileUri } = await getPreparedSession(absoluteFilePath);
+  const result = await session.request("textDocument/documentSymbol", {
+    textDocument: {
+      uri: fileUri,
+    },
   });
-  const connection = new JsonRpcConnection(serverProcess);
-  const fileUri = pathToFileURL(absoluteFilePath).toString();
-  const rootUri = pathToFileURL(`${projectRoot}\\`).toString();
-  const fileText = await readFile(absoluteFilePath, "utf8");
 
-  try {
-    await connection.request("initialize", {
-      processId: process.pid,
-      rootUri,
-      capabilities: {
-        textDocument: {
-          documentSymbol: {
-            hierarchicalDocumentSymbolSupport: true,
-          },
-        },
-      },
-      workspaceFolders: [
-        {
-          uri: rootUri,
-          name: basename(projectRoot),
-        },
-      ],
-    });
+  return normalizeDocumentSymbols(result);
+}
 
-    connection.notify("initialized", {});
-    connection.notify("textDocument/didOpen", {
-      textDocument: {
-        uri: fileUri,
-        languageId: getLanguageId(absoluteFilePath),
-        version: 1,
-        text: fileText,
-      },
-    });
+export async function getTypeScriptDefinition(
+  absoluteFilePath: string,
+  line: number,
+  column: number,
+): Promise<LspLocation[]> {
+  const { projectRoot, session, fileUri } = await getPreparedSession(absoluteFilePath);
+  const result = await session.request("textDocument/definition", {
+    textDocument: {
+      uri: fileUri,
+    },
+    position: toLspPosition(line, column),
+  });
 
-    const result = await connection.request("textDocument/documentSymbol", {
-      textDocument: {
-        uri: fileUri,
-      },
-    });
+  return normalizeLocations(projectRoot, result);
+}
 
-    return normalizeDocumentSymbols(result);
-  } finally {
-    await shutdownServer(connection, serverProcess);
-  }
+export async function getTypeScriptReferences(
+  absoluteFilePath: string,
+  line: number,
+  column: number,
+): Promise<LspLocation[]> {
+  const { projectRoot, session, fileUri } = await getPreparedSession(absoluteFilePath);
+  const result = await session.request("textDocument/references", {
+    textDocument: {
+      uri: fileUri,
+    },
+    position: toLspPosition(line, column),
+    context: {
+      includeDeclaration: true,
+    },
+  });
+
+  return normalizeLocations(projectRoot, result);
 }

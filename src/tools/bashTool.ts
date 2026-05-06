@@ -1,51 +1,14 @@
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
+import { validateBashCommand } from "../securityPolicy.js";
 
-const execAsync = promisify(exec);
 const BASH_TIMEOUT_MS = 10_000;
 const MAX_OUTPUT_BUFFER = 1024 * 1024;
 
-type CommandError = Error & {
-  code?: number | string;
-  killed?: boolean;
-  signal?: string;
-  stdout?: unknown;
-  stderr?: unknown;
+type CommandResult = {
+  exitCode: number | string;
+  stdout: string;
+  stderr: string;
 };
-
-function getBlockedCommandReason(command: string): string | null {
-  const normalized = command.toLowerCase().trim();
-
-  if (normalized.includes("rm -rf")) {
-    return "rm -rf is destructive";
-  }
-
-  if (normalized.includes("del /s")) {
-    return "del /s is destructive";
-  }
-
-  if (normalized.includes("remove-item") && normalized.includes("-recurse")) {
-    return "Remove-Item -Recurse is destructive";
-  }
-
-  if (normalized.startsWith("format ")) {
-    return "format is destructive";
-  }
-
-  if (normalized.includes("shutdown") || normalized.includes("restart-computer")) {
-    return "shutdown and restart commands are blocked";
-  }
-
-  if (normalized.includes(":(){")) {
-    return "fork bomb pattern is blocked";
-  }
-
-  if (["vim", "nano", "notepad", "python", "node"].includes(normalized)) {
-    return "interactive commands without arguments are blocked";
-  }
-
-  return null;
-}
 
 function formatCommandResult(exitCode: number | string, stdout = "", stderr = ""): string {
   return `Exit code: ${exitCode}
@@ -56,42 +19,131 @@ STDERR:
 ${stderr}`;
 }
 
-function toOutputText(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
+function getPowerShellExecutable(): string {
+  return process.platform === "win32" ? "powershell.exe" : "pwsh";
+}
+
+function buildLocalSpawnArgs(command: string): { command: string; args: string[] } {
+  if (process.platform === "win32") {
+    return {
+      command: getPowerShellExecutable(),
+      args: ["-NoProfile", "-NonInteractive", "-Command", command],
+    };
   }
 
-  if (Buffer.isBuffer(value)) {
-    return value.toString("utf-8");
-  }
+  return {
+    command: "sh",
+    args: ["-lc", command],
+  };
+}
 
-  return "";
+function buildDockerSpawnArgs(command: string): { command: string; args: string[] } {
+  return {
+    command: "docker",
+    args: [
+      "run",
+      "--rm",
+      "-v",
+      `${process.cwd()}:/workspace`,
+      "-w",
+      "/workspace",
+      "node:20-alpine",
+      "sh",
+      "-lc",
+      command,
+    ],
+  };
+}
+
+async function runCommand(command: string): Promise<CommandResult> {
+  const useDockerSandbox = process.env.AGENT_BASH_SANDBOX === "docker";
+  const spawnTarget = useDockerSandbox
+    ? buildDockerSpawnArgs(command)
+    : buildLocalSpawnArgs(command);
+
+  return new Promise((resolve) => {
+    const child = spawn(spawnTarget.command, spawnTarget.args, {
+      cwd: process.cwd(),
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    let finished = false;
+
+    const timeout = setTimeout(() => {
+      if (!finished) {
+        child.kill();
+        finished = true;
+        resolve({
+          exitCode: "timeout",
+          stdout,
+          stderr: `Command timed out after ${BASH_TIMEOUT_MS}ms.\n${stderr}`,
+        });
+      }
+    }, BASH_TIMEOUT_MS);
+
+    function appendOutput(kind: "stdout" | "stderr", chunk: Buffer): void {
+      if (finished) {
+        return;
+      }
+
+      const text = chunk.toString("utf-8");
+
+      if (kind === "stdout") {
+        stdout += text;
+      } else {
+        stderr += text;
+      }
+
+      if (stdout.length + stderr.length > MAX_OUTPUT_BUFFER) {
+        child.kill();
+        finished = true;
+        clearTimeout(timeout);
+        resolve({
+          exitCode: "max-buffer",
+          stdout,
+          stderr: `Command output exceeded ${MAX_OUTPUT_BUFFER} bytes.\n${stderr}`,
+        });
+      }
+    }
+
+    child.stdout.on("data", (chunk: Buffer) => appendOutput("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => appendOutput("stderr", chunk));
+
+    child.on("error", (error) => {
+      if (!finished) {
+        finished = true;
+        clearTimeout(timeout);
+        resolve({
+          exitCode: "error",
+          stdout,
+          stderr: error.message,
+        });
+      }
+    });
+
+    child.on("close", (code, signal) => {
+      if (!finished) {
+        finished = true;
+        clearTimeout(timeout);
+        resolve({
+          exitCode: code ?? signal ?? "error",
+          stdout,
+          stderr,
+        });
+      }
+    });
+  });
 }
 
 export async function bashTool(command: string): Promise<string> {
-  const blockedReason = getBlockedCommandReason(command);
-
-  if (blockedReason) {
-    return formatCommandResult("blocked", "", `Command blocked: ${blockedReason}`);
-  }
-
   try {
-    const result = await execAsync(command, {
-      timeout: BASH_TIMEOUT_MS,
-      maxBuffer: MAX_OUTPUT_BUFFER,
-      windowsHide: true,
-    });
-
-    return formatCommandResult(0, toOutputText(result.stdout), toOutputText(result.stderr));
+    validateBashCommand(command);
   } catch (error) {
-    const commandError = error as CommandError;
-    const exitCode = commandError.killed
-      ? "timeout"
-      : commandError.code ?? commandError.signal ?? "error";
-    const stderr = commandError.killed
-      ? `Command timed out after ${BASH_TIMEOUT_MS}ms.\n${toOutputText(commandError.stderr)}`
-      : toOutputText(commandError.stderr);
-
-    return formatCommandResult(exitCode, toOutputText(commandError.stdout), stderr);
+    const message = error instanceof Error ? error.message : "Unknown security policy error";
+    return formatCommandResult("blocked", "", message);
   }
+
+  const result = await runCommand(command);
+  return formatCommandResult(result.exitCode, result.stdout, result.stderr);
 }

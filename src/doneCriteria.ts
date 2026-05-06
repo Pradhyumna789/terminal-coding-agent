@@ -12,6 +12,7 @@ export type DoneCriteriaConfig = {
   requireTypeCheck: boolean;
   requireTestsIfAvailable: boolean;
   requireFinalSummary: boolean;
+  testCommand?: string;
 };
 
 export type DoneCheckResult = {
@@ -54,7 +55,7 @@ function toOutputText(value: unknown): string {
 }
 
 async function getPackageScripts(): Promise<Record<string, string>> {
-  const packageJsonPath = resolveProjectPath("package.json");
+  const packageJsonPath = await resolveProjectPath("package.json");
   const rawPackageJson = await readFile(packageJsonPath, "utf-8");
   const packageJson = JSON.parse(rawPackageJson) as {
     scripts?: Record<string, unknown>;
@@ -90,7 +91,10 @@ async function runTypeCheckDoneCheck(required: boolean): Promise<DoneCheckResult
   };
 }
 
-async function runTestsDoneCheck(requiredIfAvailable: boolean): Promise<DoneCheckResult> {
+async function runTestsDoneCheck(
+  requiredIfAvailable: boolean,
+  testCommand = "npm test",
+): Promise<DoneCheckResult> {
   const scripts = await getPackageScripts();
 
   if (!hasRealTestScript(scripts)) {
@@ -104,7 +108,7 @@ async function runTestsDoneCheck(requiredIfAvailable: boolean): Promise<DoneChec
   }
 
   try {
-    await execAsync("npm test", {
+    await execAsync(testCommand, {
       timeout: TEST_TIMEOUT_MS,
       maxBuffer: MAX_OUTPUT_BUFFER,
       windowsHide: true,
@@ -115,7 +119,7 @@ async function runTestsDoneCheck(requiredIfAvailable: boolean): Promise<DoneChec
       required: requiredIfAvailable,
       passed: true,
       skipped: false,
-      message: "npm test passed.",
+      message: `${testCommand} passed.`,
     };
   } catch (error) {
     const commandError = error as CommandError;
@@ -123,7 +127,7 @@ async function runTestsDoneCheck(requiredIfAvailable: boolean): Promise<DoneChec
       ? "timeout"
       : commandError.code ?? commandError.signal ?? "error";
     const stderr = commandError.killed
-      ? `npm test timed out after ${TEST_TIMEOUT_MS}ms.`
+      ? `${testCommand} timed out after ${TEST_TIMEOUT_MS}ms.`
       : toOutputText(commandError.stderr).trim();
 
     return {
@@ -131,7 +135,7 @@ async function runTestsDoneCheck(requiredIfAvailable: boolean): Promise<DoneChec
       required: requiredIfAvailable,
       passed: false,
       skipped: false,
-      message: `npm test failed with exit code ${exitCode}.${stderr ? ` ${stderr}` : ""}`,
+      message: `${testCommand} failed with exit code ${exitCode}.${stderr ? ` ${stderr}` : ""}`,
     };
   }
 }
@@ -159,7 +163,7 @@ export async function runDoneCriteria(
   }
 
   if (config.requireTestsIfAvailable) {
-    checks.push(await runTestsDoneCheck(true));
+    checks.push(await runTestsDoneCheck(true, config.testCommand));
   }
 
   if (config.requireFinalSummary) {

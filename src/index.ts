@@ -4,15 +4,34 @@ import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { runAcpMode } from "./acpMode.js";
 import { runAcpRealMode } from "./acpRealMode.js";
-import { runAgent } from "./agent.js";
-import { runDocsMode } from "./docsMode.js";
-import { runSpecFirst } from "./specFirst.js";
-import { runTddMode } from "./tddMode.js";
+import { runAgent, runAgentWithMessages } from "./agent.js";
+import {
+  formatDoneCriteriaResult,
+  runDoneCriteria,
+} from "./doneCriteria.js";
+import { buildDocsPrompt, runDocsMode } from "./docsMode.js";
+import { type ChatMessage } from "./llmClient.js";
+import {
+  type SecurityOptions,
+  type ToolApprovalRequest,
+} from "./securityPolicy.js";
+import { buildSpecPrompt, runSpecFirst } from "./specFirst.js";
+import { buildTddPrompt, runTddMode } from "./tddMode.js";
 import { initTelemetry, shutdownTelemetry } from "./telemetry.js";
+import { shutdownTypeScriptLanguageServer } from "./lsp/lspClient.js";
 
 const DOCS_COMMAND_PREFIX = "/docs";
+const HISTORY_COMMAND = "/history";
+const MAX_INTERACTIVE_MESSAGES = 30;
+const RESET_COMMAND = "/reset";
 const SPEC_COMMAND_PREFIX = "/spec";
 const TDD_COMMAND_PREFIX = "/tdd";
+const SECURITY_FLAGS = new Set([
+  "--yes",
+  "--deny-tools",
+  "--allow-bash",
+  "--allow-sensitive-read",
+]);
 
 function getPromptFromArgs(args: string[]): string | null {
   const promptWithEquals = args.find((arg) => arg.startsWith("--prompt="));
@@ -28,7 +47,10 @@ function getPromptFromArgs(args: string[]): string | null {
     return null;
   }
 
-  const prompt = args.slice(promptFlagIndex + 1).join(" ").trim();
+  const promptParts = args
+    .slice(promptFlagIndex + 1)
+    .filter((arg) => !SECURITY_FLAGS.has(arg));
+  const prompt = promptParts.join(" ").trim();
 
   if (!prompt) {
     return null;
@@ -53,6 +75,26 @@ function hasAcpRealFlag(args: string[]): boolean {
   return args.includes("--acp-real");
 }
 
+function hasYesFlag(args: string[]): boolean {
+  return args.includes("--yes");
+}
+
+function hasDenyToolsFlag(args: string[]): boolean {
+  return args.includes("--deny-tools");
+}
+
+function hasAllowBashFlag(args: string[]): boolean {
+  return args.includes("--allow-bash");
+}
+
+function hasAllowSensitiveReadFlag(args: string[]): boolean {
+  return args.includes("--allow-sensitive-read");
+}
+
+function hasOnlySecurityFlags(args: string[]): boolean {
+  return args.every((arg) => SECURITY_FLAGS.has(arg));
+}
+
 function printUsage(): void {
   console.error('Usage: npm run dev -- --prompt "your prompt here"');
   console.error('   or: npm run dev -- -p "your prompt here"');
@@ -60,6 +102,7 @@ function printUsage(): void {
   console.error('   or: npm run dev -- --tdd --prompt "your task here"');
   console.error("   or: npm run dev -- --acp");
   console.error("   or: npm run dev -- --acp-real");
+  console.error("Security flags: --yes --allow-bash --allow-sensitive-read --deny-tools");
 }
 
 function isExitCommand(value: string): boolean {
@@ -76,24 +119,172 @@ function clearTerminal(): void {
   console.clear();
 }
 
-async function runOneShot(prompt: string): Promise<void> {
-  const finalAnswer = await runAgent(prompt);
+function isResetCommand(value: string): boolean {
+  return value.trim().toLowerCase() === RESET_COMMAND;
+}
+
+function isHistoryCommand(value: string): boolean {
+  return value.trim().toLowerCase() === HISTORY_COMMAND;
+}
+
+function trimInteractiveMessages(messages: ChatMessage[]): void {
+  if (messages.length <= MAX_INTERACTIVE_MESSAGES) {
+    return;
+  }
+
+  const securityMessage = messages[0]?.role === "system" ? messages[0] : null;
+
+  messages.splice(0, messages.length - MAX_INTERACTIVE_MESSAGES);
+
+  while (messages.length > 0 && messages[0].role !== "user") {
+    messages.shift();
+  }
+
+  if (securityMessage && messages[0] !== securityMessage) {
+    messages.unshift(securityMessage);
+  }
+}
+
+async function runOneShot(prompt: string, security: SecurityOptions): Promise<void> {
+  const finalAnswer = await runAgent(prompt, { security });
   console.log(finalAnswer);
 }
 
-async function runSpecFirstOneShot(task: string): Promise<void> {
-  const spec = await runSpecFirst(task);
+async function runSpecFirstOneShot(task: string, security: SecurityOptions): Promise<void> {
+  const spec = await runSpecFirst(task, security);
   console.log(spec);
 }
 
-async function runTddOneShot(task: string): Promise<void> {
-  const finalAnswer = await runTddMode(task);
+async function runTddOneShot(task: string, security: SecurityOptions): Promise<void> {
+  const finalAnswer = await runTddMode(task, security);
   console.log(finalAnswer);
 }
 
-async function runDocsOneShot(topic: string): Promise<void> {
-  const finalAnswer = await runDocsMode(topic);
+async function runDocsOneShot(topic: string, security: SecurityOptions): Promise<void> {
+  const finalAnswer = await runDocsMode(topic, security);
   console.log(finalAnswer);
+}
+
+function createBaseSecurityOptions(args: string[]): SecurityOptions {
+  return {
+    autoApprove: hasYesFlag(args),
+    denyMutatingTools: hasDenyToolsFlag(args),
+    allowBash: hasAllowBashFlag(args),
+    allowSensitiveRead: hasAllowSensitiveReadFlag(args),
+  };
+}
+
+function formatApprovalDetails(request: ToolApprovalRequest): string {
+  return Object.entries(request.details)
+    .map(([key, value]) => `${key}: ${value}`)
+    .join(", ");
+}
+
+function createInteractiveApprovalHandler(
+  rl: ReturnType<typeof createInterface>,
+): SecurityOptions["approvalHandler"] {
+  return async (request) => {
+    const details = formatApprovalDetails(request);
+    const answer = await rl.question(
+      `[approval] ${request.toolName} requested. ${request.reason} ${details} Approve? (y/N) `,
+    );
+    const normalized = answer.trim().toLowerCase();
+
+    return normalized === "y" || normalized === "yes";
+  };
+}
+
+async function runInteractiveAgentTurn(
+  messages: ChatMessage[],
+  prompt: string,
+  agentPrompt = prompt,
+  security: SecurityOptions = {},
+  options: {
+    maxSteps?: number | null;
+    mode?: "interactive" | "tdd" | "docs";
+  } = {},
+): Promise<string> {
+  const messageCountBeforeRun = messages.length;
+
+  messages.push({
+    role: "user",
+    content: agentPrompt,
+  });
+
+  try {
+    const finalAnswer = await runAgentWithMessages(messages, {
+      maxSteps: options.maxSteps,
+      mode: options.mode ?? "interactive",
+      promptForRecord: prompt,
+      conversationMessageCountBeforeRun: messageCountBeforeRun,
+      security,
+    });
+
+    trimInteractiveMessages(messages);
+    return finalAnswer;
+  } catch (error) {
+    messages.splice(messageCountBeforeRun);
+    throw error;
+  }
+}
+
+async function runInteractiveSpecTurn(
+  messages: ChatMessage[],
+  task: string,
+  security: SecurityOptions,
+): Promise<string> {
+  const messageCountBeforeRun = messages.length;
+
+  messages.push({
+    role: "user",
+    content: buildSpecPrompt(task),
+  });
+
+  try {
+    const content = await runAgentWithMessages(messages, {
+      mode: "spec-first",
+      includeTools: false,
+      promptForRecord: task,
+      conversationMessageCountBeforeRun: messageCountBeforeRun,
+      security,
+    });
+    trimInteractiveMessages(messages);
+    return content;
+  } catch (error) {
+    messages.splice(messageCountBeforeRun);
+    throw error;
+  }
+}
+
+async function runInteractiveTddTurn(
+  messages: ChatMessage[],
+  task: string,
+  security: SecurityOptions,
+): Promise<string> {
+  const agentSummary = await runInteractiveAgentTurn(
+    messages,
+    task,
+    buildTddPrompt(task),
+    security,
+    {
+      maxSteps: null,
+      mode: "tdd",
+    },
+  );
+  const doneCriteria = await runDoneCriteria(agentSummary);
+  const doneCriteriaReport = formatDoneCriteriaResult(doneCriteria);
+
+  if (!doneCriteria.passed) {
+    return `${agentSummary}
+
+${doneCriteriaReport}
+
+Status: NOT DONE. One or more required verification checks failed.`;
+  }
+
+  return `${agentSummary}
+
+${doneCriteriaReport}`;
 }
 
 function getSlashCommandTask(prompt: string, commandPrefix: string): string | null {
@@ -108,8 +299,15 @@ function getSlashCommandTask(prompt: string, commandPrefix: string): string | nu
   return prompt.slice(commandPrefix.length).trim();
 }
 
-async function runInteractiveMode(): Promise<void> {
+async function runInteractiveMode(security: SecurityOptions): Promise<void> {
   const rl = createInterface({ input, output });
+  const messages: ChatMessage[] = [];
+  const interactiveSecurity: SecurityOptions = {
+    ...security,
+    approvalHandler: security.autoApprove
+      ? security.approvalHandler
+      : createInteractiveApprovalHandler(rl),
+  };
 
   try {
     while (true) {
@@ -129,6 +327,17 @@ async function runInteractiveMode(): Promise<void> {
         continue;
       }
 
+      if (isResetCommand(prompt)) {
+        messages.length = 0;
+        console.log("Conversation memory cleared.");
+        continue;
+      }
+
+      if (isHistoryCommand(prompt)) {
+        console.log(`Conversation memory contains ${messages.length} message(s).`);
+        continue;
+      }
+
       const docsTopic = getSlashCommandTask(prompt, DOCS_COMMAND_PREFIX);
 
       if (docsTopic !== null) {
@@ -138,7 +347,16 @@ async function runInteractiveMode(): Promise<void> {
         }
 
         try {
-          await runDocsOneShot(docsTopic);
+          const finalAnswer = await runInteractiveAgentTurn(
+            messages,
+            docsTopic,
+            buildDocsPrompt(docsTopic),
+            interactiveSecurity,
+            {
+              mode: "docs",
+            },
+          );
+          console.log(finalAnswer);
         } catch (error) {
           const message = error instanceof Error ? error.message : "Unknown error";
           console.error(`Error: ${message}`);
@@ -156,7 +374,8 @@ async function runInteractiveMode(): Promise<void> {
         }
 
         try {
-          await runSpecFirstOneShot(specTask);
+          const spec = await runInteractiveSpecTurn(messages, specTask, interactiveSecurity);
+          console.log(spec);
         } catch (error) {
           const message = error instanceof Error ? error.message : "Unknown error";
           console.error(`Error: ${message}`);
@@ -174,7 +393,8 @@ async function runInteractiveMode(): Promise<void> {
         }
 
         try {
-          await runTddOneShot(tddTask);
+          const finalAnswer = await runInteractiveTddTurn(messages, tddTask, interactiveSecurity);
+          console.log(finalAnswer);
         } catch (error) {
           const message = error instanceof Error ? error.message : "Unknown error";
           console.error(`Error: ${message}`);
@@ -184,7 +404,13 @@ async function runInteractiveMode(): Promise<void> {
       }
 
       try {
-        await runOneShot(prompt);
+        const finalAnswer = await runInteractiveAgentTurn(
+          messages,
+          prompt,
+          prompt,
+          interactiveSecurity,
+        );
+        console.log(finalAnswer);
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error";
         console.error(`Error: ${message}`);
@@ -205,14 +431,15 @@ async function main(): Promise<void> {
   const stdinIsPiped = input.isTTY !== true;
   const specFirst = hasSpecFirstFlag(args);
   const tdd = hasTddFlag(args);
+  const security = createBaseSecurityOptions(args);
 
   if (acpReal) {
-    await runAcpRealMode();
+    await runAcpRealMode(security);
     return;
   }
 
   if (acp || (stdinIsPiped && !prompt)) {
-    await runAcpMode();
+    await runAcpMode(security);
     return;
   }
 
@@ -224,26 +451,26 @@ async function main(): Promise<void> {
 
   if (prompt) {
     if (specFirst) {
-      await runSpecFirstOneShot(prompt);
+      await runSpecFirstOneShot(prompt, security);
       return;
     }
 
     if (tdd) {
-      await runTddOneShot(prompt);
+      await runTddOneShot(prompt, security);
       return;
     }
 
-    await runOneShot(prompt);
+    await runOneShot(prompt, security);
     return;
   }
 
-  if (args.length > 0) {
+  if (args.length > 0 && !hasOnlySecurityFlags(args)) {
     printUsage();
     process.exitCode = 1;
     return;
   }
 
-  await runInteractiveMode();
+  await runInteractiveMode(security);
 }
 
 try {
@@ -253,5 +480,6 @@ try {
   console.error(`Error: ${message}`);
   process.exitCode = 1;
 } finally {
+  await shutdownTypeScriptLanguageServer();
   await shutdownTelemetry();
 }
