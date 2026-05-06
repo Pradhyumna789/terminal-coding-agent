@@ -1,8 +1,13 @@
 import { createInterface } from "node:readline";
 import { stdin, stdout } from "node:process";
+import { SpanStatusCode } from "@opentelemetry/api";
 import { handleAcpRealMessage } from "./acpRealMode.js";
 import { type AgentEvent, runAgent } from "./agent.js";
 import { type SecurityOptions } from "./securityPolicy.js";
+import {
+  getTracer,
+  recordAcpRequestMetric,
+} from "./telemetry.js";
 import { redactSecretValues } from "./traceLogger.js";
 
 type AcpRunRequest = {
@@ -146,6 +151,7 @@ async function handleRunRequest(
   try {
     const finalAnswer = await runAgent(request.prompt, {
       security,
+      mode: "acp",
       onEvent(event) {
         writeEvent({
           type: "agent_event",
@@ -186,41 +192,63 @@ async function handleMessage(parsed: unknown, security: SecurityOptions): Promis
     return;
   }
 
-  if (messageType === "ping") {
-    writeEvent({
-      type: "pong",
-      id,
-    });
-    return;
-  }
+  return getTracer().startActiveSpan("acp.request", async (span) => {
+    const startedAt = Date.now();
+    span.setAttribute("acp.type", messageType);
+    span.setAttribute("acp.id_length", id.length);
+    recordAcpRequestMetric(messageType, "started");
 
-  if (messageType === "capabilities") {
-    writeEvent({
-      type: "capabilities_result",
-      id,
-      capabilities: ACP_CAPABILITIES,
-    });
-    return;
-  }
-
-  if (messageType === "run") {
     try {
-      await handleRunRequest(parseRunRequest(parsed, id), security);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Invalid ACP request.";
+      if (messageType === "ping") {
+        writeEvent({
+          type: "pong",
+          id,
+        });
+        span.setStatus({ code: SpanStatusCode.OK });
+        recordAcpRequestMetric(messageType, "success", Date.now() - startedAt);
+        return;
+      }
+
+      if (messageType === "capabilities") {
+        writeEvent({
+          type: "capabilities_result",
+          id,
+          capabilities: ACP_CAPABILITIES,
+        });
+        span.setStatus({ code: SpanStatusCode.OK });
+        recordAcpRequestMetric(messageType, "success", Date.now() - startedAt);
+        return;
+      }
+
+      if (messageType === "run") {
+        try {
+          await handleRunRequest(parseRunRequest(parsed, id), security);
+          span.setStatus({ code: SpanStatusCode.OK });
+          recordAcpRequestMetric(messageType, "success", Date.now() - startedAt);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Invalid ACP request.";
+          writeEvent({
+            type: "error",
+            id,
+            error: sanitizeText(message),
+          });
+          span.setStatus({ code: SpanStatusCode.ERROR, message: "ACP run failed." });
+          span.recordException(new Error("ACP run failed."));
+          recordAcpRequestMetric(messageType, "error", Date.now() - startedAt);
+        }
+        return;
+      }
+
       writeEvent({
         type: "error",
         id,
-        error: message,
+        error: `Unsupported ACP message type: ${messageType}`,
       });
+      span.setStatus({ code: SpanStatusCode.ERROR, message: "Unsupported ACP message type." });
+      recordAcpRequestMetric(messageType, "error", Date.now() - startedAt);
+    } finally {
+      span.end();
     }
-    return;
-  }
-
-  writeEvent({
-    type: "error",
-    id,
-    error: `Unsupported ACP message type: ${messageType}`,
   });
 }
 

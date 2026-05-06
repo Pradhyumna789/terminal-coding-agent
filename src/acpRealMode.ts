@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { stdin, stdout } from "node:process";
+import { SpanStatusCode } from "@opentelemetry/api";
 import { type AgentEvent, runAgent } from "./agent.js";
 import { type SecurityOptions } from "./securityPolicy.js";
+import { getTracer, recordAcpRequestMetric } from "./telemetry.js";
 import { redactSecretValues } from "./traceLogger.js";
 
 const PROTOCOL_VERSION = 1;
@@ -324,7 +326,7 @@ async function handleSessionPrompt(
   }
 
   try {
-    await runAgent(promptText, { onEvent, security });
+    await runAgent(promptText, { onEvent, security, mode: "acp-real" });
 
     writeResult(getRequestId(request) ?? null, {
       stopReason: session.cancelled ? "cancelled" : "end_turn",
@@ -358,36 +360,58 @@ function handleSessionCancel(request: JsonRpcRequest): void {
 }
 
 async function handleRequest(request: JsonRpcRequest, security: SecurityOptions): Promise<void> {
-  try {
-    if (request.method === "initialize") {
-      handleInitialize(request);
-      return;
-    }
+  return getTracer().startActiveSpan("acp.request", async (span) => {
+    const startedAt = Date.now();
+    span.setAttribute("acp.protocol", "jsonrpc");
+    span.setAttribute("acp.method", request.method);
+    recordAcpRequestMetric(request.method, "started");
 
-    if (request.method === "session/new") {
-      handleSessionNew(request);
-      return;
-    }
+    try {
+      if (request.method === "initialize") {
+        handleInitialize(request);
+        span.setStatus({ code: SpanStatusCode.OK });
+        recordAcpRequestMetric(request.method, "success", Date.now() - startedAt);
+        return;
+      }
 
-    if (request.method === "session/prompt") {
-      await handleSessionPrompt(request, security);
-      return;
-    }
+      if (request.method === "session/new") {
+        handleSessionNew(request);
+        span.setStatus({ code: SpanStatusCode.OK });
+        recordAcpRequestMetric(request.method, "success", Date.now() - startedAt);
+        return;
+      }
 
-    if (request.method === "session/cancel") {
-      handleSessionCancel(request);
-      return;
-    }
+      if (request.method === "session/prompt") {
+        await handleSessionPrompt(request, security);
+        span.setStatus({ code: SpanStatusCode.OK });
+        recordAcpRequestMetric(request.method, "success", Date.now() - startedAt);
+        return;
+      }
 
-    if (request.id !== undefined) {
-      writeError(request.id, -32601, `Method not found: ${request.method}`);
+      if (request.method === "session/cancel") {
+        handleSessionCancel(request);
+        span.setStatus({ code: SpanStatusCode.OK });
+        recordAcpRequestMetric(request.method, "success", Date.now() - startedAt);
+        return;
+      }
+
+      if (request.id !== undefined) {
+        writeError(request.id, -32601, `Method not found: ${request.method}`);
+      }
+      span.setStatus({ code: SpanStatusCode.ERROR, message: "Unknown ACP method." });
+      recordAcpRequestMetric(request.method, "error", Date.now() - startedAt);
+    } catch (error) {
+      if (request.id !== undefined) {
+        const message = error instanceof Error ? error.message : "Invalid request.";
+        writeError(request.id, -32602, message);
+      }
+      span.setStatus({ code: SpanStatusCode.ERROR, message: "ACP request failed." });
+      span.recordException(new Error("ACP request failed."));
+      recordAcpRequestMetric(request.method, "error", Date.now() - startedAt);
+    } finally {
+      span.end();
     }
-  } catch (error) {
-    if (request.id !== undefined) {
-      const message = error instanceof Error ? error.message : "Invalid request.";
-      writeError(request.id, -32602, message);
-    }
-  }
+  });
 }
 
 export async function handleAcpRealMessage(

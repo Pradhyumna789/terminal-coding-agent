@@ -362,6 +362,8 @@ The Docker Compose observability stack includes:
 - Jaeger
 - Grafana
 - Grafana Tempo
+- Prometheus
+- Grafana Loki
 
 Start the stack:
 
@@ -394,6 +396,8 @@ OpenTelemetry Collector OTLP gRPC: http://localhost:4317
 OpenTelemetry Collector OTLP HTTP: http://localhost:4318
 Jaeger UI: http://localhost:16686
 Grafana: http://localhost:3000
+Prometheus: http://localhost:9090
+Loki: http://localhost:3100
 ```
 
 Grafana uses the default development login:
@@ -402,8 +406,28 @@ Grafana uses the default development login:
 admin / admin
 ```
 
-When `OTEL_ENABLED=true`, the app exports OpenTelemetry traces to the collector.
-The current trace hierarchy is:
+When `OTEL_ENABLED=true`, the app exports OpenTelemetry traces, metrics, and
+structured logs to the collector. The collector routes traces to Jaeger and
+Tempo, metrics to Prometheus, and logs to Loki. Grafana is provisioned with all
+three datasources plus a starter dashboard named **Terminal Coding Agent
+Observability**.
+
+Run the app with telemetry enabled:
+
+```powershell
+$env:OTEL_ENABLED="true"
+npm run dev -- --yes --prompt "Use SearchFiles to find agent.ts and summarize it."
+```
+
+Optional endpoint overrides:
+
+```powershell
+$env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://localhost:4318/v1/traces"
+$env:OTEL_EXPORTER_OTLP_METRICS_ENDPOINT="http://localhost:4318/v1/metrics"
+$env:OTEL_EXPORTER_OTLP_LOGS_ENDPOINT="http://localhost:4318/v1/logs"
+```
+
+The current trace hierarchy includes:
 
 ```text
 agent.run
@@ -414,13 +438,21 @@ agent.run
   tool.SearchFiles
   tool.TypeCheck
   tool.LSP
+  workflow.phase
+  done.criteria
+  agent.finalize
 ```
 
 Span attributes only store safe metadata such as lengths, durations, tool names,
 file paths, search queries, and redacted shell commands.
 
-Each local black-box recorder file in `runs/` includes a `traceId` field. When
-an OpenTelemetry trace is active, use that value to find the matching trace:
+ACP protocol requests also create `acp.request` spans. LSP-backed operations
+create `lsp.request` spans.
+
+Each local black-box recorder file in `runs/` includes a top-level `traceId` and
+a compact `observability` section with the root span id, duration, tool-call
+counts, LLM request count, verification status, and final status. When an
+OpenTelemetry trace is active, use `traceId` to find the matching trace:
 
 ```text
 Jaeger: http://localhost:16686
@@ -428,6 +460,21 @@ Grafana: Explore -> Tempo -> TraceID query
 ```
 
 If telemetry is disabled, `traceId` is `null`.
+
+Grafana checks:
+
+```text
+Dashboards -> Terminal Coding Agent -> Terminal Coding Agent Observability
+Explore -> Tempo -> search by traceId
+Explore -> Prometheus -> query agent_* metrics
+Explore -> Loki -> query {service_name="terminal-coding-agent"}
+```
+
+The project intentionally keeps three observability layers:
+
+- stderr traces for quick human debugging in the terminal
+- `runs/*.json` black-box records for local audit and capstone demos
+- OpenTelemetry signals for Jaeger/Grafana production-style inspection
 
 ## Build And Run
 

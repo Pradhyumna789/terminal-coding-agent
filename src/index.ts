@@ -17,7 +17,11 @@ import {
 } from "./securityPolicy.js";
 import { buildSpecPrompt, runSpecFirst } from "./specFirst.js";
 import { buildTddPrompt, runTddMode } from "./tddMode.js";
-import { initTelemetry, shutdownTelemetry } from "./telemetry.js";
+import {
+  initTelemetry,
+  recordInteractiveSessionMetric,
+  shutdownTelemetry,
+} from "./telemetry.js";
 import { shutdownTypeScriptLanguageServer } from "./lsp/lspClient.js";
 
 const DOCS_COMMAND_PREFIX = "/docs";
@@ -309,6 +313,8 @@ async function runInteractiveMode(security: SecurityOptions): Promise<void> {
       : createInteractiveApprovalHandler(rl),
   };
 
+  recordInteractiveSessionMetric("started");
+
   try {
     while (true) {
       const userInput = await rl.question("agent> ");
@@ -417,6 +423,7 @@ async function runInteractiveMode(security: SecurityOptions): Promise<void> {
       }
     }
   } finally {
+    recordInteractiveSessionMetric("ended");
     rl.close();
   }
 }

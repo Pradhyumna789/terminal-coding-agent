@@ -18,7 +18,13 @@ import { readTool } from "./tools/readTool.js";
 import { searchFilesTool, type SearchFilesOptions } from "./tools/searchFilesTool.js";
 import { typeCheckTool } from "./tools/typeCheckTool.js";
 import { writeTool } from "./tools/writeTool.js";
-import { getTracer } from "./telemetry.js";
+import {
+  emitTelemetryLog,
+  recordAgentRunCompleted,
+  recordAgentRunStarted,
+  recordToolMetric,
+  getTracer,
+} from "./telemetry.js";
 import {
   formatUntrustedFileContent,
   isSensitiveFilePath,
@@ -361,6 +367,7 @@ function startToolSpan(toolName: string | undefined, toolCallId: string): Span {
 
   span.setAttribute("tool.name", safeToolName);
   span.setAttribute("tool.call_id", toolCallId);
+  recordToolMetric(safeToolName, "started");
 
   return span;
 }
@@ -369,22 +376,25 @@ function setToolFilePath(span: Span, filePath: string): void {
   span.setAttribute("tool.file_path", redactSecretValues(filePath));
 }
 
-function finishToolSpan(span: Span, durationMs: number, result: string): void {
+function finishToolSpan(span: Span, toolName: string, durationMs: number, result: string): void {
   span.setAttribute("tool.duration_ms", durationMs);
   span.setAttribute("tool.result_length", result.length);
   span.setStatus({ code: SpanStatusCode.OK });
+  recordToolMetric(toolName, "success", durationMs);
   span.end();
 }
 
-function failToolSpan(span: Span, durationMs: number, error: unknown): void {
+function failToolSpan(span: Span, toolName: string, durationMs: number, error: unknown): void {
   const message = error instanceof Error ? error.message : "Unknown error";
+  const safeMessage = redactSecretValues(message);
 
   span.setAttribute("tool.duration_ms", durationMs);
-  span.recordException(error instanceof Error ? error : new Error(message));
+  span.recordException(error instanceof Error ? new Error(safeMessage) : new Error(safeMessage));
   span.setStatus({
     code: SpanStatusCode.ERROR,
-    message: redactSecretValues(message),
+    message: safeMessage,
   });
+  recordToolMetric(toolName, "error", durationMs);
   span.end();
 }
 
@@ -398,12 +408,26 @@ function getValidTraceId(span: Span): string | null {
   return traceId;
 }
 
+function getValidSpanId(span: Span): string | null {
+  const spanId = span.spanContext().spanId;
+
+  if (!spanId || /^0+$/.test(spanId)) {
+    return null;
+  }
+
+  return spanId;
+}
+
 async function saveRecorderSafely(recorder: BlackBoxRecorder): Promise<void> {
   try {
     await recorder.save();
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
-    console.error(`[recorder] failed to save run: ${message}`);
+    const safeMessage = redactSecretValues(message);
+    console.error(`[recorder] failed to save run: ${safeMessage}`);
+    emitTelemetryLog("recorder_save_error", "Black-box recorder failed to save run record.", {
+      "error.message": safeMessage,
+    });
   }
 }
 
@@ -463,7 +487,7 @@ async function executeToolCall(
       const result = formatUntrustedFileContent(filePath, rawResult);
       const durationMs = Date.now() - startedAt;
       logToolSuccess("Read", durationMs);
-      finishToolSpan(span, durationMs, result);
+      finishToolSpan(span, "Read", durationMs, result);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -520,7 +544,7 @@ async function executeToolCall(
       const result = await writeTool(args.filePath, args.content);
       const durationMs = Date.now() - startedAt;
       logToolSuccess("Write", durationMs);
-      finishToolSpan(span, durationMs, result);
+      finishToolSpan(span, "Write", durationMs, result);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -565,7 +589,7 @@ async function executeToolCall(
       const result = await bashTool(command);
       const durationMs = Date.now() - startedAt;
       logToolSuccess("Bash", durationMs);
-      finishToolSpan(span, durationMs, result);
+      finishToolSpan(span, "Bash", durationMs, result);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -609,7 +633,7 @@ async function executeToolCall(
       const result = await searchFilesTool(query, options);
       const durationMs = Date.now() - startedAt;
       logToolSuccess("SearchFiles", durationMs);
-      finishToolSpan(span, durationMs, result);
+      finishToolSpan(span, "SearchFiles", durationMs, result);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -646,7 +670,7 @@ async function executeToolCall(
       const result = await typeCheckTool();
       const durationMs = Date.now() - startedAt;
       logToolSuccess("TypeCheck", durationMs);
-      finishToolSpan(span, durationMs, result);
+      finishToolSpan(span, "TypeCheck", durationMs, result);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -687,7 +711,7 @@ async function executeToolCall(
       const result = await documentSymbolsTool(filePath);
       const durationMs = Date.now() - startedAt;
       logToolSuccess("DocumentSymbols", durationMs);
-      finishToolSpan(span, durationMs, result);
+      finishToolSpan(span, "DocumentSymbols", durationMs, result);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -741,7 +765,7 @@ async function executeToolCall(
       const result = await goToDefinitionTool(args.filePath, args.line, args.column);
       const durationMs = Date.now() - startedAt;
       logToolSuccess("GoToDefinition", durationMs);
-      finishToolSpan(span, durationMs, result);
+      finishToolSpan(span, "GoToDefinition", durationMs, result);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -792,7 +816,7 @@ async function executeToolCall(
       const result = await findReferencesTool(args.filePath, args.line, args.column);
       const durationMs = Date.now() - startedAt;
       logToolSuccess("FindReferences", durationMs);
-      finishToolSpan(span, durationMs, result);
+      finishToolSpan(span, "FindReferences", durationMs, result);
       spanEnded = true;
       emitAgentEvent(onEvent, {
         type: "tool_completed",
@@ -817,8 +841,10 @@ async function executeToolCall(
 
     throw new Error(`Unsupported tool requested: ${toolName ?? "unknown"}`);
   } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    recorder.recordToolError(toolName ?? "unknown", message);
     if (!spanEnded) {
-      failToolSpan(span, Date.now() - startedAt, error);
+      failToolSpan(span, toolName ?? "unknown", Date.now() - startedAt, error);
     }
 
     throw error;
@@ -858,10 +884,13 @@ export async function runAgentWithMessages(
   const promptForRecord = options.promptForRecord ?? getLastUserPrompt(messages);
   ensureSecuritySystemMessage(messages);
   const maxSteps = options.maxSteps ?? MAX_AGENT_STEPS;
+  const mode = options.mode ?? "normal";
+  const startedAt = Date.now();
   const agentSpan = getTracer().startSpan("agent.run");
   const activeContext = trace.setSpan(otelContext.active(), agentSpan);
 
-  agentSpan.setAttribute("agent.mode", options.mode ?? "normal");
+  recordAgentRunStarted(mode);
+  agentSpan.setAttribute("agent.mode", mode);
   agentSpan.setAttribute("agent.prompt_length", promptForRecord.length);
   agentSpan.setAttribute("agent.max_steps", maxSteps === null ? "unlimited" : maxSteps);
   agentSpan.setAttribute("agent.message_count_start", messages.length);
@@ -869,8 +898,9 @@ export async function runAgentWithMessages(
   return otelContext.with(activeContext, async () => {
     const recorder = createBlackBoxRecorder({
       prompt: promptForRecord,
-      mode: options.mode,
+      mode,
       traceId: getValidTraceId(agentSpan),
+      rootSpanId: getValidSpanId(agentSpan),
       conversationMessageCountBeforeRun: options.conversationMessageCountBeforeRun,
     });
     recordWorkflowEvents(recorder, options.workflowEvents ?? []);
@@ -884,6 +914,7 @@ export async function runAgentWithMessages(
       for (let step = 0; maxSteps === null || step < maxSteps; step += 1) {
         agentSpan.setAttribute("agent.current_step", step + 1);
 
+        recorder.recordLlmRequest();
         const assistantMessage = await sendMessagesToLlm(messages, {
           includeTools: options.includeTools ?? true,
         });
@@ -912,6 +943,14 @@ export async function runAgentWithMessages(
           agentSpan.setAttribute("agent.final_answer_length", finalContent.length);
           agentSpan.setAttribute("agent.message_count_end", messages.length);
           agentSpan.setStatus({ code: SpanStatusCode.OK });
+          getTracer().startActiveSpan("agent.finalize", (finalizeSpan) => {
+            finalizeSpan.setAttribute("agent.mode", mode);
+            finalizeSpan.setAttribute("agent.status", "success");
+            finalizeSpan.setAttribute("agent.final_answer_length", finalContent.length);
+            finalizeSpan.setStatus({ code: SpanStatusCode.OK });
+            finalizeSpan.end();
+          });
+          recordAgentRunCompleted(mode, "success", Date.now() - startedAt);
           emitAgentEvent(options.onEvent, {
             type: "agent_completed",
             finalAnswer: sanitizeEventText(finalContent),
@@ -943,13 +982,24 @@ export async function runAgentWithMessages(
       throw new Error(`Agent stopped after reaching the maximum of ${maxSteps} steps.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
+      const safeMessage = redactSecretValues(message);
       recorder.recordError(message);
       recorder.setConversationMessageCountAfterRun(messages.length);
-      agentSpan.recordException(error instanceof Error ? error : new Error(message));
+      agentSpan.recordException(new Error(safeMessage));
       agentSpan.setStatus({
         code: SpanStatusCode.ERROR,
-        message: redactSecretValues(message),
+        message: safeMessage,
       });
+      getTracer().startActiveSpan("agent.finalize", (finalizeSpan) => {
+        finalizeSpan.setAttribute("agent.mode", mode);
+        finalizeSpan.setAttribute("agent.status", "error");
+        finalizeSpan.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: safeMessage,
+        });
+        finalizeSpan.end();
+      });
+      recordAgentRunCompleted(mode, "error", Date.now() - startedAt);
       emitAgentEvent(options.onEvent, {
         type: "agent_error",
         error: sanitizeEventText(message),

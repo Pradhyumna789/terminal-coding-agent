@@ -1,3 +1,6 @@
+import { SeverityNumber } from "@opentelemetry/api-logs";
+import { emitTelemetryLog } from "./telemetry.js";
+
 type TraceArguments = Record<string, string | number>;
 
 function timestamp(): string {
@@ -25,21 +28,45 @@ export function redactSecretValues(value: string): string {
 }
 
 export function logToolStart(toolName: string, args: TraceArguments): void {
+  const safeArgs = redactSecretValues(JSON.stringify(args));
   console.error(
-    `[tool] ${timestamp()} ${toolName} started ${redactSecretValues(JSON.stringify(args))}`,
+    `[tool] ${timestamp()} ${toolName} started ${safeArgs}`,
   );
+  emitTelemetryLog("tool_started", `${toolName} started.`, {
+    "tool.name": toolName,
+    "tool.args": safeArgs,
+  });
 }
 
 export function logToolSuccess(toolName: string, durationMs: number): void {
   console.error(`[tool] ${timestamp()} ${toolName} success ${durationMs}ms`);
+  emitTelemetryLog("tool_success", `${toolName} succeeded.`, {
+    "tool.name": toolName,
+    "tool.duration_ms": durationMs,
+  });
 }
 
 export function logToolError(toolName: string, durationMs: number, errorMessage: string): void {
+  const safeMessage = redactSecretValues(errorMessage);
   console.error(
-    `[tool] ${timestamp()} ${toolName} error ${durationMs}ms ${redactSecretValues(errorMessage)}`,
+    `[tool] ${timestamp()} ${toolName} error ${durationMs}ms ${safeMessage}`,
+  );
+  emitTelemetryLog(
+    "tool_error",
+    `${toolName} failed.`,
+    {
+      "tool.name": toolName,
+      "tool.duration_ms": durationMs,
+      "error.message": safeMessage,
+    },
+    SeverityNumber.ERROR,
   );
 }
 
 export function logAgentDebug(message: string, details: Record<string, string | number>): void {
-  console.error(`[agent] ${timestamp()} ${message} ${redactSecretValues(JSON.stringify(details))}`);
+  const safeDetails = redactSecretValues(JSON.stringify(details));
+  console.error(`[agent] ${timestamp()} ${message} ${safeDetails}`);
+  emitTelemetryLog("agent_debug", redactSecretValues(message), {
+    "agent.details": safeDetails,
+  });
 }

@@ -7,9 +7,11 @@ services:
     ports:
       - "4317:4317"
       - "4318:4318"
+      - "8889:8889"
     depends_on:
       - jaeger
       - tempo
+      - loki
 
   jaeger:
     image: jaegertracing/all-in-one:1.57
@@ -25,6 +27,26 @@ services:
       - ./tempo.yaml:/etc/tempo.yaml:ro
       - tempo-data:/var/tempo
 
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+
+  loki:
+    image: grafana/loki:3.1.0
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes:
+      - ./loki.yaml:/etc/loki/loki.yaml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+
   grafana:
     image: grafana/grafana:10.4.3
     environment:
@@ -32,12 +54,18 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
     volumes:
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
       - "3000:3000"
     depends_on:
       - tempo
+      - prometheus
+      - loki
 
 volumes:
   grafana-data:
   tempo-data:
+  prometheus-data:
+  loki-data:

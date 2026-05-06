@@ -1,6 +1,6 @@
 import { SpanStatusCode } from "@opentelemetry/api";
 import { tools } from "./tools/schemas.js";
-import { getTracer } from "./telemetry.js";
+import { emitTelemetryLog, getTracer, recordLlmMetric } from "./telemetry.js";
 import { redactSecretValues } from "./traceLogger.js";
 
 export type ToolCall = {
@@ -77,6 +77,7 @@ export async function sendMessagesToLlm(
 ): Promise<AssistantMessage> {
   const includeTools = options.includeTools ?? true;
   const span = getTracer().startSpan("llm.request");
+  const startedAt = Date.now();
 
   span.setAttribute("llm.message_count", messages.length);
   span.setAttribute("llm.tools_enabled", includeTools);
@@ -113,15 +114,27 @@ export async function sendMessagesToLlm(
     span.setAttribute("llm.response_content_length", assistantMessage.content?.length ?? 0);
     span.setAttribute("llm.tool_call_count", assistantMessage.tool_calls?.length ?? 0);
     span.setStatus({ code: SpanStatusCode.OK });
+    recordLlmMetric("success", Date.now() - startedAt, includeTools);
+    emitTelemetryLog("llm_request_success", "LLM request completed.", {
+      "llm.tools_enabled": includeTools,
+      "llm.message_count": messages.length,
+      "llm.tool_call_count": assistantMessage.tool_calls?.length ?? 0,
+    });
 
     return assistantMessage;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
+    const safeMessage = redactSecretValues(message);
 
-    span.recordException(error instanceof Error ? error : new Error(message));
+    span.recordException(new Error(safeMessage));
     span.setStatus({
       code: SpanStatusCode.ERROR,
-      message: redactSecretValues(message),
+      message: safeMessage,
+    });
+    recordLlmMetric("error", Date.now() - startedAt, includeTools);
+    emitTelemetryLog("llm_request_error", "LLM request failed.", {
+      "llm.tools_enabled": includeTools,
+      "error.message": safeMessage,
     });
 
     throw error;

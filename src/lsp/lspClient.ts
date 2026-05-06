@@ -1,8 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { SpanStatusCode } from "@opentelemetry/api";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { emitTelemetryLog, getTracer } from "../telemetry.js";
 
 const LSP_REQUEST_TIMEOUT_MS = 20_000;
 
@@ -264,7 +266,27 @@ class LspSession {
 
   async request(method: string, params: unknown): Promise<unknown> {
     await this.ensureInitialized();
-    return this.connection.request(method, params);
+    return getTracer().startActiveSpan("lsp.request", async (span) => {
+      span.setAttribute("lsp.method", method);
+
+      try {
+        const result = await this.connection.request(method, params);
+        span.setStatus({ code: SpanStatusCode.OK });
+        emitTelemetryLog("lsp_request_success", "LSP request completed.", {
+          "lsp.method": method,
+        });
+        return result;
+      } catch (error) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: "LSP request failed." });
+        span.recordException(new Error("LSP request failed."));
+        emitTelemetryLog("lsp_request_error", "LSP request failed.", {
+          "lsp.method": method,
+        });
+        throw error;
+      } finally {
+        span.end();
+      }
+    });
   }
 
   async shutdown(): Promise<void> {

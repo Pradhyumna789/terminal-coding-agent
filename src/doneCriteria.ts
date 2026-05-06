@@ -1,6 +1,8 @@
 import { exec } from "node:child_process";
+import { SpanStatusCode } from "@opentelemetry/api";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
+import { getTracer, recordDoneCriteriaMetric } from "./telemetry.js";
 import { resolveProjectPath } from "./tools/pathSafety.js";
 import { typeCheckTool } from "./tools/typeCheckTool.js";
 
@@ -156,26 +158,46 @@ export async function runDoneCriteria(
   finalSummary: string,
   config: DoneCriteriaConfig = DEFAULT_DONE_CRITERIA,
 ): Promise<DoneCriteriaResult> {
-  const checks: DoneCheckResult[] = [];
+  return getTracer().startActiveSpan("done.criteria", async (span) => {
+    const checks: DoneCheckResult[] = [];
 
-  if (config.requireTypeCheck) {
-    checks.push(await runTypeCheckDoneCheck(true));
-  }
+    try {
+      if (config.requireTypeCheck) {
+        checks.push(await runTypeCheckDoneCheck(true));
+      }
 
-  if (config.requireTestsIfAvailable) {
-    checks.push(await runTestsDoneCheck(true, config.testCommand));
-  }
+      if (config.requireTestsIfAvailable) {
+        checks.push(await runTestsDoneCheck(true, config.testCommand));
+      }
 
-  if (config.requireFinalSummary) {
-    checks.push(runFinalSummaryDoneCheck(true, finalSummary));
-  }
+      if (config.requireFinalSummary) {
+        checks.push(runFinalSummaryDoneCheck(true, finalSummary));
+      }
 
-  const passed = checks.every((check) => check.skipped || check.passed || !check.required);
+      for (const check of checks) {
+        recordDoneCriteriaMetric(check.name, check.passed, check.skipped);
+      }
 
-  return {
-    passed,
-    checks,
-  };
+      const passed = checks.every((check) => check.skipped || check.passed || !check.required);
+      span.setAttribute("done_criteria.check_count", checks.length);
+      span.setAttribute("done_criteria.status", passed ? "passed" : "failed");
+      span.setStatus({ code: passed ? SpanStatusCode.OK : SpanStatusCode.ERROR });
+
+      return {
+        passed,
+        checks,
+      };
+    } catch (error) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: "Done criteria failed.",
+      });
+      span.recordException(new Error("Done criteria failed."));
+      throw error;
+    } finally {
+      span.end();
+    }
+  });
 }
 
 export function formatDoneCriteriaResult(result: DoneCriteriaResult): string {

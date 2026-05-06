@@ -2,8 +2,16 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { redactSecretValues } from "./traceLogger.js";
+import { emitTelemetryLog } from "./telemetry.js";
 
-export type AgentRunMode = "normal" | "interactive" | "spec-first" | "tdd" | "docs";
+export type AgentRunMode =
+  | "normal"
+  | "interactive"
+  | "spec-first"
+  | "tdd"
+  | "docs"
+  | "acp"
+  | "acp-real";
 
 type RecorderArguments = Record<string, string | number>;
 
@@ -39,6 +47,12 @@ type AgentRunEvent =
       summary: string;
     }
   | {
+      type: "tool_error";
+      timestamp: string;
+      toolName: string;
+      message: string;
+    }
+  | {
       type: "final_answer";
       timestamp: string;
       summary: string;
@@ -62,6 +76,16 @@ type AgentRunRecord = {
   filesWritten: string[];
   bashCommands: string[];
   typeCheckResults: string[];
+  observability: {
+    traceId: string | null;
+    rootSpanId: string | null;
+    durationMs: number | null;
+    toolCallCount: number;
+    toolErrorCount: number;
+    llmRequestCount: number;
+    verificationStatus: "passed" | "failed" | "not_recorded";
+    status: "running" | "success" | "error";
+  };
   finalAnswer?: string;
   error?: string;
 };
@@ -69,6 +93,8 @@ type AgentRunRecord = {
 export type BlackBoxRecorder = {
   recordToolCall(toolName: string, args: RecorderArguments): void;
   recordToolResult(toolName: string, summary: string): void;
+  recordToolError(toolName: string, errorMessage: string): void;
+  recordLlmRequest(): void;
   recordFileRead(filePath: string): void;
   recordFileWritten(filePath: string): void;
   recordBashCommand(command: string): void;
@@ -116,13 +142,16 @@ export function createBlackBoxRecorder(input: {
   prompt: string;
   mode?: AgentRunMode;
   traceId?: string | null;
+  rootSpanId?: string | null;
   conversationMessageCountBeforeRun?: number;
 }): BlackBoxRecorder {
+  const startedAt = Date.now();
+  const traceId = input.traceId ?? null;
   const record: AgentRunRecord = {
     id: randomUUID(),
     timestamp: now(),
     mode: input.mode ?? "normal",
-    traceId: input.traceId ?? null,
+    traceId,
     prompt: truncate(sanitizeText(input.prompt)),
     conversationMessageCountBeforeRun: input.conversationMessageCountBeforeRun,
     events: [],
@@ -130,6 +159,16 @@ export function createBlackBoxRecorder(input: {
     filesWritten: [],
     bashCommands: [],
     typeCheckResults: [],
+    observability: {
+      traceId,
+      rootSpanId: input.rootSpanId ?? null,
+      durationMs: null,
+      toolCallCount: 0,
+      toolErrorCount: 0,
+      llmRequestCount: 0,
+      verificationStatus: "not_recorded",
+      status: "running",
+    },
   };
 
   return {
@@ -149,6 +188,12 @@ export function createBlackBoxRecorder(input: {
       });
     },
     recordVerificationResult(name, passed, summary) {
+      if (!passed) {
+        record.observability.verificationStatus = "failed";
+      } else if (record.observability.verificationStatus === "not_recorded") {
+        record.observability.verificationStatus = "passed";
+      }
+
       record.events.push({
         type: "verification_result",
         timestamp: now(),
@@ -158,6 +203,7 @@ export function createBlackBoxRecorder(input: {
       });
     },
     recordToolCall(toolName, args) {
+      record.observability.toolCallCount += 1;
       record.events.push({
         type: "tool_call",
         timestamp: now(),
@@ -172,6 +218,19 @@ export function createBlackBoxRecorder(input: {
         toolName,
         summary: truncate(sanitizeText(summary)),
       });
+    },
+    recordToolError(toolName, errorMessage) {
+      const message = truncate(sanitizeText(errorMessage));
+      record.observability.toolErrorCount += 1;
+      record.events.push({
+        type: "tool_error",
+        timestamp: now(),
+        toolName,
+        message,
+      });
+    },
+    recordLlmRequest() {
+      record.observability.llmRequestCount += 1;
     },
     recordFileRead(filePath) {
       record.filesRead.push(truncate(sanitizeText(filePath)));
@@ -188,6 +247,7 @@ export function createBlackBoxRecorder(input: {
     recordFinalAnswer(answer) {
       const summary = truncate(sanitizeText(answer));
       record.finalAnswer = summary;
+      record.observability.status = "success";
       record.events.push({
         type: "final_answer",
         timestamp: now(),
@@ -197,6 +257,7 @@ export function createBlackBoxRecorder(input: {
     recordError(errorMessage) {
       const message = truncate(sanitizeText(errorMessage));
       record.error = message;
+      record.observability.status = "error";
       record.events.push({
         type: "error",
         timestamp: now(),
@@ -210,8 +271,16 @@ export function createBlackBoxRecorder(input: {
       const runsDirectory = join(process.cwd(), "runs");
       const fileName = `${safeTimestamp()}-${record.mode}-${record.id}.json`;
 
+      record.observability.durationMs = Date.now() - startedAt;
       await mkdir(runsDirectory, { recursive: true });
       await writeFile(join(runsDirectory, fileName), JSON.stringify(record, null, 2), "utf-8");
+      emitTelemetryLog("recorder_save", "Black-box recorder saved run record.", {
+        "recorder.mode": record.mode,
+        "recorder.status": record.observability.status,
+        "recorder.tool_call_count": record.observability.toolCallCount,
+        "recorder.tool_error_count": record.observability.toolErrorCount,
+        "recorder.llm_request_count": record.observability.llmRequestCount,
+      });
     },
   };
 }
